@@ -1,174 +1,148 @@
-import os
-import sys
-import time
-import threading
 import cv2
-import torch
+import time
+import queue
+import threading
 import requests
-import numpy as np
+import torch
 from facenet_pytorch import MTCNN
-
-# GUI Warnings ko suppress karein
-os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false;qt.font*=false"
-os.environ["QT_QPA_PLATFORM"] = "xcb"
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000"
 
 # ----------------- CONFIGURATION -----------------
 BACKEND_URL = "http://127.0.0.1:8000/api/attendance/process"
-COOLDOWN_SECONDS = 3.0
+COOLDOWN_SECONDS = 4.0
 
+# CAM1: Entry RTSP (LOGIN)
 CAM1_CONFIG = {
     "name": "Office Entry Feed (Cam1 - LOGIN)",
-    "source": 0,  # Built-in Webcam
+    "source": "rtsp://nidhin:Nidhin123@192.168.2.178:554/Streaming/Channels/101",
     "type": "LOGIN",
     "box_color": (0, 255, 0)
 }
 
+# CAM2: Exit RTSP (LOGOUT)
 CAM2_CONFIG = {
     "name": "Office Exit Feed (Cam2 - LOGOUT)",
-    "source": "rtsp://nidhin:Nidhin123@192.168.2.178:554/Streaming/Channels/101",  # RTSP Camera
+    "source": "rtsp://nidhin:Nidhin123@192.168.2.179:554/Streaming/Channels/102",
     "type": "LOGOUT",
     "box_color": (0, 0, 255)
 }
 
-# ----------------- MODEL SETUP -----------------
+# ----------------- DETECTOR INITIALIZATION -----------------
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print(f"[*] Initializing MTCNN Detector on device: {device}...")
-detector = MTCNN(keep_all=False, select_largest=True, post_process=False, device=device)
+detector = MTCNN(keep_all=True, device=device)
 
-# ----------------- THREAD-SAFE CAPTURE CLASS -----------------
-class VideoCaptureAsync:
-    def __init__(self, src, is_rtsp=False):
+# ----------------- RTSP BUFFERLESS VIDEO CAPTURE -----------------
+class RTSPStreamReader:
+    def __init__(self, src):
         self.src = src
-        self.is_rtsp = is_rtsp
-        if is_rtsp:
-            self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-        else:
-            self.cap = cv2.VideoCapture(src)
-            
-        self.frame = None
-        self.running = True
-        self.lock = threading.Lock()
-        
-        if not self.cap.isOpened():
-            print(f"[WARN] Cannot open video source: {src}")
-            self.running = False
-            return
-
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        self.q = queue.Queue(maxsize=1)
+        self.stopped = False
+        self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
 
-    def _capture_loop(self):
-        while self.running:
+    def _update(self):
+        while not self.stopped:
             ret, frame = self.cap.read()
-            if ret:
-                with self.lock:
-                    self.frame = frame
-            else:
+            if not ret:
                 time.sleep(0.01)
+                continue
+            if not self.q.empty():
+                try:
+                    self.q.get_nowait()
+                except queue.Empty:
+                    pass
+            self.q.put(frame)
 
     def read(self):
-        with self.lock:
-            return self.frame.copy() if self.frame is not None else None
+        try:
+            return self.q.get(timeout=1.0)
+        except queue.Empty:
+            return None
 
     def stop(self):
-        self.running = False
-        if self.cap:
-            self.cap.release()
+        self.stopped = True
+        self.thread.join(timeout=1.0)
+        self.cap.release()
 
-# ----------------- CAMERA STATE OBJECT -----------------
+# ----------------- CAMERA PROCESSOR WORKER -----------------
 class CameraWorker:
-    def __init__(self, config, is_rtsp=False):
+    def __init__(self, config):
         self.config = config
-        self.stream = VideoCaptureAsync(config["source"], is_rtsp=is_rtsp)
-        self.last_sent = 0
-        self.status = "Monitoring..."
-        self.frame_count = 0
+        self.stream = RTSPStreamReader(config["source"])
+        self.last_sent_time = 0.0
+
+    def send_attendance(self, cropped_face):
+        success, encoded = cv2.imencode('.jpg', cropped_face)
+        if not success:
+            return
+        files = {'file': ('face.jpg', encoded.tobytes(), 'image/jpeg')}
+        data = {'camera_type': self.config['type']}
+        try:
+            res = requests.post(BACKEND_URL, files=files, data=data, timeout=3)
+            print(f"[{self.config['type']} SUCCESS] -> {res.json()}")
+        except Exception as e:
+            print(f"[{self.config['type']} ERROR] -> {e}")
 
     def process_frame(self, frame):
-        self.frame_count += 1
-        h, w, _ = frame.shape
+        h, w = frame.shape[:2]
+        small_frame = cv2.resize(frame, (640, 360))
+        rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        # Har 4th frame par detect karein taaki smooth rahe
-        if self.frame_count % 4 == 0:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            boxes, probs = detector.detect(rgb)
+        detection = detector.detect(rgb)
+        boxes = detection[0]
 
-            if boxes is not None and len(boxes) > 0 and probs[0] > 0.90:
-                box = boxes[0].astype(int)
-                x1, y1 = max(0, box[0]), max(0, box[1])
-                x2, y2 = min(w, box[2]), min(h, box[3])
-                
-                face_crop = frame[y1:y2, x1:x2]
-                curr_time = time.time()
+        if boxes is not None:
+            scale_x = w / 640.0
+            scale_y = h / 360.0
 
-                if face_crop.size > 0 and (curr_time - self.last_sent > COOLDOWN_SECONDS):
-                    self.last_sent = curr_time
-                    self.status = f"Sending {self.config['type']}..."
+            for box in boxes:
+                x1 = int(box[0] * scale_x)
+                y1 = int(box[1] * scale_y)
+                x2 = int(box[2] * scale_x)
+                y2 = int(box[3] * scale_y)
 
-                    # API call in a quick daemon thread so video does not stutter
-                    threading.Thread(
-                        target=self._send_api, 
-                        args=(face_crop, self.config['type']),
-                        daemon=True
-                    ).start()
+                # Clamp boundaries
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
 
+                # Draw bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), self.config["box_color"], 2)
-                cv2.putText(frame, f"{self.config['type']} DETECTED", (x1, max(20, y1 - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.config["box_color"], 2)
+                label = f"{self.config['type']}"
+                cv2.putText(frame, label, (x1, max(y1 - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.config["box_color"], 2)
 
-        cv2.putText(frame, self.status, (15, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        return frame
+                # Cooldown check & Async API Dispatch
+                now = time.time()
+                if (now - self.last_sent_time) > COOLDOWN_SECONDS:
+                    face_crop = frame[y1:y2, x1:x2]
+                    if face_crop.size > 0:
+                        self.last_sent_time = now
+                        threading.Thread(target=self.send_attendance, args=(face_crop,), daemon=True).start()
 
-    def _send_api(self, face_crop, cam_type):
-        try:
-            _, img_encoded = cv2.imencode('.jpg', face_crop)
-            files = {'file': ('face.jpg', img_encoded.tobytes(), 'image/jpeg')}
-            data = {'camera_type': cam_type}
-            res = requests.post(BACKEND_URL, files=files, data=data, timeout=3)
-            if res.status_code == 200:
-                res_json = res.json()
-                self.status = f"{res_json.get('status')} ({res_json.get('user_id')})"
-                print(f"[{cam_type} SUCCESS] -> {res_json}")
-            else:
-                self.status = f"HTTP {res.status_code}"
-        except Exception as e:
-            self.status = "Backend Err"
-            print(f"[{cam_type} ERROR] -> {e}")
+        return cv2.resize(frame, (800, 480))
 
-# ----------------- MAIN RUNNER -----------------
 if __name__ == "__main__":
     print("[*] Launching Dual Stream Attendance System...")
     print("[*] Press 'q' on any active window to exit.")
 
-    cam1 = CameraWorker(CAM1_CONFIG, is_rtsp=False)
-    cam2 = CameraWorker(CAM2_CONFIG, is_rtsp=True)
+    cam1 = CameraWorker(CAM1_CONFIG)
+    cam2 = CameraWorker(CAM2_CONFIG)
 
     try:
         while True:
-            # Cam1 Frame Render (Main Thread)
             f1 = cam1.stream.read()
             if f1 is not None:
-                f1_processed = cam1.process_frame(f1)
-                cv2.imshow(CAM1_CONFIG["name"], f1_processed)
+                cv2.imshow(CAM1_CONFIG["name"], cam1.process_frame(f1))
 
-            # Cam2 Frame Render (Main Thread)
             f2 = cam2.stream.read()
             if f2 is not None:
-                f2_processed = cam2.process_frame(f2)
-                cv2.imshow(CAM2_CONFIG["name"], f2_processed)
+                cv2.imshow(CAM2_CONFIG["name"], cam2.process_frame(f2))
 
-            # GUI events must be checked on main thread
             key = cv2.waitKey(10) & 0xFF
             if key == ord('q') or key == 27:
-                print("\n[*] 'q' pressed. Closing all streams...")
                 break
-
-    except KeyboardInterrupt:
-        print("\n[*] Stopping streams...")
     finally:
         cam1.stream.stop()
         cam2.stream.stop()
         cv2.destroyAllWindows()
-        print("[*] All cameras stopped cleanly.")

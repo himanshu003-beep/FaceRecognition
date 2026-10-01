@@ -141,8 +141,8 @@
                     <th>Log ID</th>
                     <th>User ID</th>
                     <th>Name</th>
-                    <th>Login Time</th>
-                    <th>Logout Time</th>
+                    <th>Login Time (IST)</th>
+                    <th>Logout Time (IST)</th>
                     <th>Duration</th>
                     <th>Status</th>
                 </tr>
@@ -178,7 +178,7 @@
             }
 
             logs.forEach(log => {
-                const isInOffice = (!log.logout_time || log.logout_time === "-");
+                const isInOffice = (log.status === "IN OFFICE" || !log.logout_time || log.logout_time === "-");
                 if (isInOffice) {
                     inOfficeCount++;
                 } else {
@@ -239,7 +239,7 @@
             };
 
             socket.onerror = (error) => {
-                console.error("[WS] Error:", error);
+                console.error("[WS Error]:", error);
             };
 
             socket.onclose = () => {

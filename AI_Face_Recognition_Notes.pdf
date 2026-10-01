@@ -1,0 +1,43 @@
+%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj
+4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+5 0 obj << /Length 6 0 R >>
+stream
+BT
+/F1 16 Tf
+50 740 Td
+(AI Face Recognition System - Project Notes) Tj
+/F1 11 Tf
+0 -30 Td
+(1. Core Packages Installed: torch, torchvision, facenet-pytorch, opencv-python, numpy) Tj
+0 -20 Td
+(2. Video & AI Pipeline: MTCNN for face crop, InceptionResnetV1 for embeddings) Tj
+0 -20 Td
+(3. Performance: Frame-skipping mechanism implemented for stable FPS) Tj
+0 -20 Td
+(4. Memory & Purge: Replaced old face images automatically with latest frames) Tj
+0 -20 Td
+(5. Execution Context: python and python3 are unified inside virtual environment) Tj
+0 -20 Td
+(6. Architecture: Single-file main.py design adopted to eliminate import issues) Tj
+ET
+endstream
+endobj
+6 0 obj
+520
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000222 00000 n 
+0000000293 00000 n 
+0000000885 00000 n 
+trailer << /Size 7 /Root 1 0 R >>
+startxref
+906
+%%EOF

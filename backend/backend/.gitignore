@@ -1,0 +1,9 @@
+# Secret credentials ignore karein
+.env
+
+# Virtual environment ignore karein (bohot heavy hota hai)
+venv/
+
+# Python compiled cache files
+__pycache__/
+*.pyc

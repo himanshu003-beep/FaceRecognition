@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Face Attendance Dashboard</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            padding: 24px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #334155;
+            margin-bottom: 24px;
+        }
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+        .status-badge {
+            font-size: 14px;
+            font-weight: 500;
+            padding: 6px 12px;
+            border-radius: 9999px;
+            background-color: #1e293b;
+        }
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 16px 20px;
+        }
+        .card h3 {
+            font-size: 13px;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+        }
+        .card p {
+            font-size: 28px;
+            font-weight: 700;
+            color: #f1f5f9;
+        }
+        .table-container {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+        thead {
+            background-color: #0f172a;
+        }
+        th, td {
+            padding: 14px 16px;
+            font-size: 14px;
+        }
+        th {
+            color: #94a3b8;
+            font-weight: 600;
+            border-bottom: 1px solid #334155;
+        }
+        tbody tr {
+            border-bottom: 1px solid #334155;
+        }
+        tbody tr:last-child {
+            border-bottom: none;
+        }
+        tbody tr:hover {
+            background-color: #273549;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge-in {
+            background-color: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.4);
+        }
+        .badge-out {
+            background-color: rgba(148, 163, 184, 0.2);
+            color: #cbd5e1;
+            border: 1px solid rgba(148, 163, 184, 0.4);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>AI Face Attendance Dashboard</h1>
+        <div id="statusIndicator" class="status-badge">
+            <span style="color: #eab308;">Connecting to WebSocket...</span>
+        </div>
+    </div>
+
+    <div class="cards-grid">
+        <div class="card">
+            <h3>Total Records</h3>
+            <p id="totalRecords">0</p>
+        </div>
+        <div class="card">
+            <h3>Currently In Office</h3>
+            <p id="currentlyInOffice" style="color: #4ade80;">0</p>
+        </div>
+        <div class="card">
+            <h3>Checked Out</h3>
+            <p id="checkedOut" style="color: #94a3b8;">0</p>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Log ID</th>
+                    <th>User ID</th>
+                    <th>Name</th>
+                    <th>Login Time</th>
+                    <th>Logout Time</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="logsTableBody">
+                <tr>
+                    <td colspan="7" style="text-align: center; color: #94a3b8;">Loading attendance data...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const tableBody = document.getElementById("logsTableBody");
+        const totalRecordsCard = document.getElementById("totalRecords");
+        const currentlyInOfficeCard = document.getElementById("currentlyInOffice");
+        const checkedOutCard = document.getElementById("checkedOut");
+        const statusIndicator = document.getElementById("statusIndicator");
+
+        let socket = null;
+
+        function renderDashboard(logs) {
+            tableBody.innerHTML = "";
+            let inOfficeCount = 0;
+            let checkedOutCount = 0;
+
+            if (!logs || logs.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: #94a3b8;">No attendance records found yet.</td></tr>`;
+                totalRecordsCard.innerText = "0";
+                currentlyInOfficeCard.innerText = "0";
+                checkedOutCard.innerText = "0";
+                return;
+            }
+
+            logs.forEach(log => {
+                const isInOffice = (!log.logout_time || log.logout_time === "-");
+                if (isInOffice) {
+                    inOfficeCount++;
+                } else {
+                    checkedOutCount++;
+                }
+
+                const row = document.createElement("tr");
+                row.innerHTML = `
+                    <td>#${log.id}</td>
+                    <td><strong>${log.user_id}</strong></td>
+                    <td>${log.name}</td>
+                    <td>${log.login_time || "-"}</td>
+                    <td>${log.logout_time || "-"}</td>
+                    <td>${log.duration || "-"}</td>
+                    <td>
+                        <span class="badge ${isInOffice ? 'badge-in' : 'badge-out'}">
+                            ${isInOffice ? 'IN OFFICE' : 'CHECKED OUT'}
+                        </span>
+                    </td>
+                `;
+                tableBody.appendChild(row);
+            });
+
+            totalRecordsCard.innerText = logs.length;
+            currentlyInOfficeCard.innerText = inOfficeCount;
+            checkedOutCard.innerText = checkedOutCount;
+        }
+
+        async function loadInitialData() {
+            try {
+                const res = await fetch("http://127.0.0.1:8000/attendance/logs");
+                if (res.ok) {
+                    const logs = await res.json();
+                    renderDashboard(logs);
+                }
+            } catch (err) {
+                console.error("Initial load failed:", err);
+            }
+        }
+
+        function initWebSocket() {
+            socket = new WebSocket("ws://127.0.0.1:8000/ws/attendance");
+
+            socket.onopen = () => {
+                statusIndicator.innerHTML = '<span style="color: #4ade80;">● Backend Online (Live WebSocket)</span>';
+                loadInitialData();
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.event === "ATTENDANCE_UPDATE") {
+                        renderDashboard(data.logs);
+                    }
+                } catch (e) {
+                    console.error("Error parsing WS data:", e);
+                }
+            };
+
+            socket.onerror = (error) => {
+                console.error("[WS] Error:", error);
+            };
+
+            socket.onclose = () => {
+                statusIndicator.innerHTML = '<span style="color: #f87171;">● Backend Offline</span>';
+                setTimeout(initWebSocket, 3000);
+            };
+        }
+
+        window.addEventListener("DOMContentLoaded", () => {
+            initWebSocket();
+        });
+    </script>
+</body>
+</html>

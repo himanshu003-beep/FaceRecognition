@@ -4,10 +4,9 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+from typing import List, Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import pymysql
@@ -21,11 +20,9 @@ import pytz
 
 load_dotenv()
 
-# ----------------- LOCAL CAPTURES DIRECTORY -----------------
 CAPTURES_DIR = Path("captures")
 CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 
-# ----------------- TIMEZONE CONFIGURATION -----------------
 IST = pytz.timezone("Asia/Kolkata")
 
 def get_current_ist() -> datetime:
@@ -48,7 +45,6 @@ def calculate_duration(start_str: str, end_dt: datetime) -> str:
     except Exception:
         return "-"
 
-# ----------------- DATABASE CONNECTION -----------------
 def get_mysql_connection():
     try:
         return pymysql.connect(
@@ -64,8 +60,7 @@ def get_mysql_connection():
         print(f"[DB WARNING] DB Connection error: {err}")
         return None
 
-# ----------------- APP INITIALIZATION -----------------
-app = FastAPI(title="AI Face Attendance Core")
+app = FastAPI(title="Office Attendance Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -77,7 +72,6 @@ app.add_middleware(
 
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
-# ----------------- AI MODEL & EMBEDDINGS -----------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
@@ -102,7 +96,6 @@ def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
         return 0.0
     return float(dot_product / (norm_a * norm_b))
 
-# ----------------- PERSISTENT STATE & MATCH ENGINE -----------------
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
 user_counter = 1
 attendance_records: List[Dict[str, Any]] = []
@@ -132,7 +125,7 @@ def init_db_and_load_state():
             """)
             conn.commit()
 
-            cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 100")
+            cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
             if rows:
                 attendance_records = rows
@@ -157,7 +150,8 @@ def init_db_and_load_state():
 
 init_db_and_load_state()
 
-def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82) -> tuple[str, str, float, bool]:
+# STRICT THRESHOLD FIXED AT 0.90 (Scores below 0.90 will be rejected as existing match)
+def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.90) -> tuple[str, str, float, bool]:
     global user_counter, REGISTERED_USERS
 
     best_user_id = None
@@ -172,11 +166,13 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82
                 best_user_id = uid
                 best_name = data["name"]
 
+    # Agar similarity strictly 0.90 ya usse zyada hai tabhi existing person match hoga
     if highest_score >= threshold and best_user_id:
         if len(REGISTERED_USERS[best_user_id]["embeddings"]) < 5:
             REGISTERED_USERS[best_user_id]["embeddings"].append(incoming_embedding)
         return best_user_id, best_name, highest_score, False
 
+    # 0.90 se kam score par system naya user id generate karega
     new_uid = f"EMP_{user_counter:03d}"
     new_name = f"Person_{user_counter}"
     user_counter += 1
@@ -186,10 +182,9 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82
         "embeddings": [incoming_embedding]
     }
     final_score = 1.0 if highest_score < 0 else highest_score
-    print(f"[AUTO-REGISTERED] Created {new_uid} for {new_name} (Threshold: {threshold})")
+    print(f"[AUTO-REGISTERED] Created {new_uid} for {new_name} (Threshold check >= {threshold} strictly enforced)")
     return new_uid, new_name, final_score, True
 
-# ----------------- LOCAL PHOTO SAVE WITH HIGH QUALITY -----------------
 def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -> str:
     timestamp = int(time.time() * 1000)
     filename = f"{user_id}_{camera_type.lower()}_{timestamp}.jpg"
@@ -197,10 +192,8 @@ def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -
     
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img.save(file_path, "JPEG", quality=95, optimize=True)
-    
     return f"http://127.0.0.1:8000/captures/{filename}"
 
-# ----------------- ATTENDANCE ENGINE -----------------
 def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float):
     global attendance_records
     now_ist = get_current_ist()
@@ -304,7 +297,6 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     return "invalid_camera", attendance_records
 
-# ----------------- WEBSOCKET BROADCASTER -----------------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -327,71 +319,13 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ----------------- AUTHENTICATION -----------------
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
-ACTIVE_SESSIONS = set(["admin-master-session-token"])
-
-# ----------------- API ENDPOINTS -----------------
 @app.get("/")
 def root():
-    return {"status": "online", "time_ist": format_timestamp(get_current_ist())}
-
-@app.post("/api/auth/login")
-def login_admin(req: LoginRequest):
-    # Verify against configured admin or database credentials
-    is_valid = (
-        (req.username == ADMIN_USERNAME and req.password == ADMIN_PASSWORD) or
-        (req.username == "ai_attendance" and req.password == "2003") or
-        (req.username == "admin" and req.password == "admin123")
-    )
-    if not is_valid:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    session_token = f"auth-{req.username}-{int(time.time() * 1000)}"
-    ACTIVE_SESSIONS.add(session_token)
-    return {
-        "status": "success",
-        "token": session_token,
-        "username": req.username,
-        "message": "Authentication successful"
-    }
-
-@app.get("/api/auth/verify")
-def verify_admin(token: Optional[str] = Query(None)):
-    if token and (token in ACTIVE_SESSIONS or token.startswith("auth-")):
-        return {"status": "authenticated", "valid": True}
-    return {"status": "unauthenticated", "valid": False}
-
-@app.get("/api/attendance/summary")
-def get_attendance_summary():
-    total = len(attendance_records)
-    in_office = sum(1 for r in attendance_records if r.get("status") == "IN OFFICE")
-    checked_out = sum(1 for r in attendance_records if r.get("status") != "IN OFFICE")
-    return {
-        "total_records": total,
-        "in_office": in_office,
-        "checked_out": checked_out,
-        "active_registered_users": len(REGISTERED_USERS),
-        "timestamp": format_timestamp(get_current_ist())
-    }
+    return {"status": "online", "system": "Office Attendance", "time_ist": format_timestamp(get_current_ist())}
 
 @app.get("/attendance/logs")
-def get_logs(search: Optional[str] = Query(None), status: Optional[str] = Query(None)):
-    filtered = attendance_records
-    if status and status.upper() != "ALL":
-        filtered = [r for r in filtered if r.get("status", "").upper() == status.upper()]
-    if search:
-        s = search.strip().lower()
-        filtered = [
-            r for r in filtered 
-            if s in str(r.get("user_id", "")).lower() or s in str(r.get("name", "")).lower()
-        ]
-    return filtered
+def get_logs():
+    return attendance_records
 
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
@@ -399,7 +333,8 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
         image_bytes = await file.read()
         embedding = extract_embedding(image_bytes)
 
-        user_id, name, score, is_new = match_or_create_user(incoming_embedding=embedding, threshold=0.82)
+        # STRICT THRESHOLD ENFORCED AT 0.90
+        user_id, name, score, is_new = match_or_create_user(incoming_embedding=embedding, threshold=0.90)
         photo_url = save_photo_and_get_url(image_bytes, user_id, camera_type)
         action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score)
 

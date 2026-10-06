@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Face Attendance Dashboard</title>
+    <title>Office Attendance</title>
     <style>
         * {
             box-sizing: border-box;
@@ -27,15 +27,47 @@
         .header h1 {
             font-size: 24px;
             font-weight: 600;
+            letter-spacing: -0.02em;
         }
-        .status-badge {
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        /* Pure Dot Indicator (No text) */
+        .live-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background-color: #ef4444; /* Default Red */
+            box-shadow: 0 0 10px #ef4444;
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        .live-dot.online {
+            background-color: #22c55e; /* Green */
+            box-shadow: 0 0 12px #22c55e;
+        }
+
+        /* Export Button */
+        .export-btn {
+            background-color: #10b981;
+            color: #ffffff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
             font-size: 13px;
-            font-weight: 500;
-            padding: 6px 14px;
-            border-radius: 9999px;
-            background-color: #1e293b;
-            border: 1px solid #334155;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background-color 0.2s;
         }
+        .export-btn:hover {
+            background-color: #059669;
+        }
+
         .cards-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -202,11 +234,12 @@
 <body>
 
     <div class="header">
-        <h1>AI Face Attendance Dashboard</h1>
+        <h1>Office Attendance</h1>
         <div class="header-actions">
-            <div id="statusIndicator" class="status-badge">
-                <span style="color: #eab308;">Connecting...</span>
-            </div>
+            <button class="export-btn" onclick="exportToExcel()">
+                📥 Export Excel
+            </button>
+            <div id="liveDot" class="live-dot" title="Server Status"></div>
         </div>
     </div>
 

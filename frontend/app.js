@@ -2,15 +2,17 @@ const tableBody = document.getElementById("logsTableBody");
 const totalRecordsCard = document.getElementById("totalRecords");
 const currentlyInOfficeCard = document.getElementById("currentlyInOffice");
 const checkedOutCard = document.getElementById("checkedOut");
-const statusIndicator = document.getElementById("statusIndicator");
+const liveDot = document.getElementById("liveDot");
 
 let socket = null;
 let reconnectTimer = null;
+let currentAttendanceData = [];
 
 function renderDashboard(logs) {
     if (!tableBody) return;
     tableBody.innerHTML = "";
-    
+    currentAttendanceData = logs || [];
+
     let inOfficeCount = 0;
     let checkedOutCount = 0;
 
@@ -30,7 +32,6 @@ function renderDashboard(logs) {
             checkedOutCount++;
         }
 
-        // WhatsApp Style Avatar + Side Pop-up Container
         const avatarHtml = log.photo_url 
             ? `<div class="avatar-box">
                  <img src="${log.photo_url}" class="avatar-img" alt="face" onerror="this.parentElement.innerHTML='<div class=\\'avatar-fallback\\'>N/A</div>'">
@@ -84,7 +85,10 @@ function initWebSocket() {
     socket = new WebSocket("ws://127.0.0.1:8000/ws/attendance");
 
     socket.onopen = () => {
-        statusIndicator.innerHTML = '<span style="color: #4ade80;">● Backend Online</span>';
+        // Online: Green dot
+        if (liveDot) {
+            liveDot.classList.add("online");
+        }
         if (reconnectTimer) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
@@ -108,9 +112,46 @@ function initWebSocket() {
     };
 
     socket.onclose = () => {
-        statusIndicator.innerHTML = '<span style="color: #f87171;">● Backend Offline</span>';
+        // Offline: Red dot
+        if (liveDot) {
+            liveDot.classList.remove("online");
+        }
         reconnectTimer = setTimeout(initWebSocket, 3000);
     };
+}
+
+// ----------------- EXCEL EXPORT FUNCTION -----------------
+function exportToExcel() {
+    if (!currentAttendanceData || currentAttendanceData.length === 0) {
+        alert("No attendance records to export!");
+        return;
+    }
+
+    // CSV Header row
+    const headers = ["Log ID", "User ID", "Name", "Login Time (IST)", "Logout Time (IST)", "Duration", "Status", "Match Score"];
+    
+    const rows = currentAttendanceData.map(log => [
+        log.id,
+        `"${log.user_id}"`,
+        `"${log.name}"`,
+        `"${log.login_time || '-'}"`,
+        `"${log.logout_time || '-'}"`,
+        `"${log.duration || '-'}"`,
+        `"${log.status}"`,
+        `"${log.similarity_score || '-'}"`
+    ]);
+
+    const csvContent = "data:text/csv;charset=utf-8," 
+        + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `Office_Attendance_${dateStr}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 }
 
 window.addEventListener("DOMContentLoaded", () => {

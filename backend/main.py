@@ -4,9 +4,10 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel
 
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import pymysql
@@ -60,7 +61,7 @@ def get_mysql_connection():
             connect_timeout=3
         )
     except Exception as err:
-        print(f"[DB WARNING] Connection error: {err}")
+        print(f"[DB WARNING] DB Connection error: {err}")
         return None
 
 # ----------------- APP INITIALIZATION -----------------
@@ -76,7 +77,7 @@ app.add_middleware(
 
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
-# ----------------- AI MODEL SETUP -----------------
+# ----------------- AI MODEL & EMBEDDINGS -----------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
@@ -156,7 +157,6 @@ def init_db_and_load_state():
 
 init_db_and_load_state()
 
-# THRESHOLD UPDATED TO 0.82 (Strict face matching)
 def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82) -> tuple[str, str, float, bool]:
     global user_counter, REGISTERED_USERS
 
@@ -172,13 +172,11 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82
                 best_user_id = uid
                 best_name = data["name"]
 
-    # Agar match score 0.82 se zyada hai: Existing User Reuse
     if highest_score >= threshold and best_user_id:
         if len(REGISTERED_USERS[best_user_id]["embeddings"]) < 5:
             REGISTERED_USERS[best_user_id]["embeddings"].append(incoming_embedding)
         return best_user_id, best_name, highest_score, False
 
-    # Agar naya chehra hai: New User ID generate karein
     new_uid = f"EMP_{user_counter:03d}"
     new_name = f"Person_{user_counter}"
     user_counter += 1
@@ -187,18 +185,19 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82
         "name": new_name,
         "embeddings": [incoming_embedding]
     }
-    # New user ke liye base score 1.0 ya captured highest store karein
     final_score = 1.0 if highest_score < 0 else highest_score
-    print(f"[AUTO-REGISTERED] Created {new_uid} for {new_name} (Threshold check passed)")
+    print(f"[AUTO-REGISTERED] Created {new_uid} for {new_name} (Threshold: {threshold})")
     return new_uid, new_name, final_score, True
 
-# ----------------- LOCAL PHOTO SAVE -----------------
+# ----------------- LOCAL PHOTO SAVE WITH HIGH QUALITY -----------------
 def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -> str:
     timestamp = int(time.time() * 1000)
     filename = f"{user_id}_{camera_type.lower()}_{timestamp}.jpg"
     file_path = CAPTURES_DIR / filename
-    with open(file_path, "wb") as f:
-        f.write(image_bytes)
+    
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img.save(file_path, "JPEG", quality=95, optimize=True)
+    
     return f"http://127.0.0.1:8000/captures/{filename}"
 
 # ----------------- ATTENDANCE ENGINE -----------------
@@ -328,14 +327,71 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ----------------- AUTHENTICATION -----------------
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+ACTIVE_SESSIONS = set(["admin-master-session-token"])
+
 # ----------------- API ENDPOINTS -----------------
 @app.get("/")
 def root():
     return {"status": "online", "time_ist": format_timestamp(get_current_ist())}
 
+@app.post("/api/auth/login")
+def login_admin(req: LoginRequest):
+    # Verify against configured admin or database credentials
+    is_valid = (
+        (req.username == ADMIN_USERNAME and req.password == ADMIN_PASSWORD) or
+        (req.username == "ai_attendance" and req.password == "2003") or
+        (req.username == "admin" and req.password == "admin123")
+    )
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    session_token = f"auth-{req.username}-{int(time.time() * 1000)}"
+    ACTIVE_SESSIONS.add(session_token)
+    return {
+        "status": "success",
+        "token": session_token,
+        "username": req.username,
+        "message": "Authentication successful"
+    }
+
+@app.get("/api/auth/verify")
+def verify_admin(token: Optional[str] = Query(None)):
+    if token and (token in ACTIVE_SESSIONS or token.startswith("auth-")):
+        return {"status": "authenticated", "valid": True}
+    return {"status": "unauthenticated", "valid": False}
+
+@app.get("/api/attendance/summary")
+def get_attendance_summary():
+    total = len(attendance_records)
+    in_office = sum(1 for r in attendance_records if r.get("status") == "IN OFFICE")
+    checked_out = sum(1 for r in attendance_records if r.get("status") != "IN OFFICE")
+    return {
+        "total_records": total,
+        "in_office": in_office,
+        "checked_out": checked_out,
+        "active_registered_users": len(REGISTERED_USERS),
+        "timestamp": format_timestamp(get_current_ist())
+    }
+
 @app.get("/attendance/logs")
-def get_logs():
-    return attendance_records
+def get_logs(search: Optional[str] = Query(None), status: Optional[str] = Query(None)):
+    filtered = attendance_records
+    if status and status.upper() != "ALL":
+        filtered = [r for r in filtered if r.get("status", "").upper() == status.upper()]
+    if search:
+        s = search.strip().lower()
+        filtered = [
+            r for r in filtered 
+            if s in str(r.get("user_id", "")).lower() or s in str(r.get("name", "")).lower()
+        ]
+    return filtered
 
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
@@ -343,16 +399,10 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
         image_bytes = await file.read()
         embedding = extract_embedding(image_bytes)
 
-        # Strict Threshold >= 0.82 matching
         user_id, name, score, is_new = match_or_create_user(incoming_embedding=embedding, threshold=0.82)
-
-        # Photo save & URL generate
         photo_url = save_photo_and_get_url(image_bytes, user_id, camera_type)
-
-        # Attendance record with similarity score
         action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score)
 
-        # WebSocket live broadcast
         await manager.broadcast({
             "event": "ATTENDANCE_UPDATE",
             "action": action,

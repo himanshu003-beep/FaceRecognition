@@ -28,11 +28,6 @@
             font-size: 24px;
             font-weight: 600;
         }
-        .header-actions {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
         .status-badge {
             font-size: 13px;
             font-weight: 500;
@@ -69,7 +64,7 @@
             background-color: #1e293b;
             border: 1px solid #334155;
             border-radius: 8px;
-            overflow: visible; /* Big Hover Zoom table borders se cut na ho */
+            overflow: visible;
         }
         table {
             width: 100%;
@@ -99,9 +94,10 @@
             background-color: #1a2436;
         }
 
-        /* ----------------- BIG CIRCLE HOVER PREVIEW ----------------- */
+        /* ----------------- WHATSAPP STYLE HOVER PREVIEW ----------------- */
         .avatar-box {
             position: relative;
+            display: inline-block;
             width: 44px;
             height: 44px;
         }
@@ -112,17 +108,57 @@
             object-fit: cover;
             border: 2px solid #3b82f6;
             cursor: pointer;
-            position: relative;
-            z-index: 10;
-            transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease, border-color 0.2s;
+            display: block;
         }
-        /* MOUSE TOUCH KARTE HI BIG CIRCLE VIEW */
-        .avatar-img:hover {
-            transform: scale(4.5);
-            z-index: 999;
-            border: 2px solid #60a5fa;
-            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.95), 0 0 20px rgba(59, 130, 246, 0.7);
+        .whatsapp-preview {
+            display: none;
+            position: absolute;
+            top: -50px;
+            left: 55px;
+            z-index: 1000;
+            background: #111827;
+            border: 2px solid #38bdf8;
+            border-radius: 16px;
+            padding: 12px;
+            box-shadow: 0 20px 35px -5px rgba(0, 0, 0, 0.95), 0 0 20px rgba(56, 189, 248, 0.35);
+            text-align: center;
+            animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+            pointer-events: none;
         }
+        .whatsapp-preview img {
+            width: 150px;
+            height: 150px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 3px solid #38bdf8;
+            display: block;
+            margin: 0 auto 8px auto;
+        }
+        .whatsapp-preview .name-tag {
+            font-size: 14px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        .whatsapp-preview .id-tag {
+            font-size: 11px;
+            color: #38bdf8;
+            font-family: monospace;
+        }
+        .avatar-box:hover .whatsapp-preview {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: scale(0.85) translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateX(0);
+            }
+        }
+
         .avatar-fallback {
             width: 44px;
             height: 44px;
@@ -135,7 +171,6 @@
             font-size: 11px;
             font-weight: bold;
         }
-
         .badge {
             display: inline-block;
             padding: 4px 8px;

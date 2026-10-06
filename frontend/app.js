@@ -1,4 +1,3 @@
-// DOM Elements
 const tableBody = document.getElementById("logsTableBody");
 const totalRecordsCard = document.getElementById("totalRecords");
 const currentlyInOfficeCard = document.getElementById("currentlyInOffice");
@@ -8,7 +7,6 @@ const statusIndicator = document.getElementById("statusIndicator");
 let socket = null;
 let reconnectTimer = null;
 
-// Dashboard UI Render Function
 function renderDashboard(logs) {
     if (!tableBody) return;
     tableBody.innerHTML = "";
@@ -32,10 +30,15 @@ function renderDashboard(logs) {
             checkedOutCount++;
         }
 
-        // Circular Face Avatar with Big Hover capability
+        // WhatsApp Style Avatar + Side Pop-up Container
         const avatarHtml = log.photo_url 
             ? `<div class="avatar-box">
                  <img src="${log.photo_url}" class="avatar-img" alt="face" onerror="this.parentElement.innerHTML='<div class=\\'avatar-fallback\\'>N/A</div>'">
+                 <div class="whatsapp-preview">
+                     <img src="${log.photo_url}" alt="preview">
+                     <div class="name-tag">${log.name}</div>
+                     <div class="id-tag">${log.user_id}</div>
+                 </div>
                </div>`
             : `<div class="avatar-fallback">N/A</div>`;
 
@@ -65,7 +68,6 @@ function renderDashboard(logs) {
     checkedOutCard.innerText = checkedOutCount;
 }
 
-// REST API Initial Data Fetch
 async function loadInitialData() {
     try {
         const response = await fetch("http://127.0.0.1:8000/attendance/logs");
@@ -78,7 +80,6 @@ async function loadInitialData() {
     }
 }
 
-// Real-Time WebSocket Connection & Event Listener
 function initWebSocket() {
     socket = new WebSocket("ws://127.0.0.1:8000/ws/attendance");
 
@@ -112,7 +113,6 @@ function initWebSocket() {
     };
 }
 
-// App Initialization
 window.addEventListener("DOMContentLoaded", () => {
     initWebSocket();
 });

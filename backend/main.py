@@ -1,21 +1,28 @@
 import os
 import io
 import json
-import asyncio
+import time
 from datetime import datetime
-import pytz
+from pathlib import Path
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import pymysql
 from PIL import Image
+import numpy as np
 import torch
 import torchvision.transforms as transforms
 from facenet_pytorch import InceptionResnetV1
 from dotenv import load_dotenv
+import pytz
 
 load_dotenv()
+
+# ----------------- LOCAL CAPTURES DIRECTORY -----------------
+CAPTURES_DIR = Path("captures")
+CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------- TIMEZONE CONFIGURATION -----------------
 IST = pytz.timezone("Asia/Kolkata")
@@ -53,11 +60,11 @@ def get_mysql_connection():
             connect_timeout=3
         )
     except Exception as err:
-        print(f"[DB WARNING] Database connection failed: {err}. Running on internal state.")
+        print(f"[DB WARNING] Connection error: {err}")
         return None
 
 # ----------------- APP INITIALIZATION -----------------
-app = FastAPI(title="AI Face Attendance Backend")
+app = FastAPI(title="AI Face Attendance Core")
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,7 +74,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------- FACE RECOGNITION SETUP -----------------
+# Photo URL provide karne ke liye static directory mount
+app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
+
+# ----------------- AI MODEL & EMBEDDINGS -----------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
@@ -77,33 +87,217 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 
-KNOWN_USERS = {
-    "EMP_001": {"name": "Person_1"},
-    "EMP_002": {"name": "Admin_Nidhin"}
-}
+def extract_embedding(image_bytes: bytes) -> np.ndarray:
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    tensor = transform(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        embedding = resnet(tensor).squeeze(0).cpu().numpy()
+    return embedding
 
-# ----------------- IN-MEMORY STATE -----------------
+def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    dot_product = np.dot(vec1, vec2)
+    norm_a = np.linalg.norm(vec1)
+    norm_b = np.linalg.norm(vec2)
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(dot_product / (norm_a * norm_b))
+
+# ----------------- PERSISTENT STATE -----------------
+REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
+user_counter = 1
 attendance_records: List[Dict[str, Any]] = []
-record_counter = 1
 
-def fetch_db_logs():
+def init_db_and_load_state():
+    global attendance_records, user_counter
     conn = get_mysql_connection()
     if not conn:
-        return attendance_records
+        print("[!] DB Offline. Starting with in-memory state.")
+        return
+
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, user_id, name, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 50")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS attendance (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id VARCHAR(50) NOT NULL,
+                    name VARCHAR(100) NOT NULL,
+                    photo_url VARCHAR(255) DEFAULT '',
+                    login_time VARCHAR(50),
+                    logout_time VARCHAR(50) DEFAULT '-',
+                    duration VARCHAR(50) DEFAULT '-',
+                    status VARCHAR(50) DEFAULT 'IN OFFICE',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
+            conn.commit()
+
+            cur.execute("SELECT id, user_id, name, photo_url, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 100")
             rows = cur.fetchall()
             if rows:
-                return rows
-            return attendance_records
+                attendance_records = rows
+                print(f"[*] Successfully restored {len(attendance_records)} previous records from MySQL.")
+
+            cur.execute("SELECT user_id FROM attendance WHERE user_id LIKE 'EMP_%'")
+            emp_rows = cur.fetchall()
+            max_num = 0
+            for r in emp_rows:
+                try:
+                    num = int(r["user_id"].split("_")[1])
+                    if num > max_num:
+                        max_num = num
+                except Exception:
+                    pass
+            user_counter = max_num + 1
+
     except Exception as e:
-        print(f"[DB QUERY ERROR] -> {e}")
-        return attendance_records
+        print(f"[DB INIT ERROR] -> {e}")
     finally:
         conn.close()
 
-# ----------------- WEBSOCKET MANAGER -----------------
+init_db_and_load_state()
+
+def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.65) -> tuple[str, str, bool]:
+    global user_counter, REGISTERED_USERS
+
+    best_user_id = None
+    best_name = None
+    highest_score = -1.0
+
+    for uid, data in REGISTERED_USERS.items():
+        for reg_vec in data.get("embeddings", []):
+            score = calculate_cosine_similarity(incoming_embedding, reg_vec)
+            if score > highest_score:
+                highest_score = score
+                best_user_id = uid
+                best_name = data["name"]
+
+    if highest_score >= threshold and best_user_id:
+        if len(REGISTERED_USERS[best_user_id]["embeddings"]) < 5:
+            REGISTERED_USERS[best_user_id]["embeddings"].append(incoming_embedding)
+        return best_user_id, best_name, False
+
+    new_uid = f"EMP_{user_counter:03d}"
+    new_name = f"Person_{user_counter}"
+    user_counter += 1
+
+    REGISTERED_USERS[new_uid] = {
+        "name": new_name,
+        "embeddings": [incoming_embedding]
+    }
+    print(f"[AUTO-REGISTERED] Generated New ID: {new_uid} for {new_name}")
+    return new_uid, new_name, True
+
+# ----------------- LOCAL PHOTO SAVE & URL -----------------
+def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -> str:
+    """Cropped image ko local disk par save karta hai aur web URL return karta hai"""
+    timestamp = int(time.time() * 1000)
+    filename = f"{user_id}_{camera_type.lower()}_{timestamp}.jpg"
+    file_path = CAPTURES_DIR / filename
+    with open(file_path, "wb") as f:
+        f.write(image_bytes)
+    return f"http://127.0.0.1:8000/captures/{filename}"
+
+# ----------------- ATTENDANCE ENGINE -----------------
+def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str):
+    global attendance_records
+    now_ist = get_current_ist()
+    time_str = format_timestamp(now_ist)
+
+    active_record = None
+    for r in attendance_records:
+        if r["user_id"] == user_id and r["status"] == "IN OFFICE":
+            active_record = r
+            break
+
+    if camera_type == "LOGIN":
+        if active_record:
+            return "already_logged_in", attendance_records
+
+        inserted_id = len(attendance_records) + 1
+        conn = get_mysql_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO attendance (user_id, name, photo_url, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (user_id, name, photo_url, time_str, "-", "-", "IN OFFICE")
+                    )
+                    conn.commit()
+                    inserted_id = cur.lastrowid
+            except Exception as e:
+                print(f"[DB INSERT WARN] -> {e}")
+            finally:
+                conn.close()
+
+        new_entry = {
+            "id": inserted_id,
+            "user_id": user_id,
+            "name": name,
+            "photo_url": photo_url,
+            "login_time": time_str,
+            "logout_time": "-",
+            "duration": "-",
+            "status": "IN OFFICE"
+        }
+        attendance_records.insert(0, new_entry)
+        return "login_recorded", attendance_records
+
+    elif camera_type == "LOGOUT":
+        if not active_record:
+            inserted_id = len(attendance_records) + 1
+            conn = get_mysql_connection()
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO attendance (user_id, name, photo_url, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                            (user_id, name, photo_url, "-", time_str, "00:00:00", "CHECKED OUT")
+                        )
+                        conn.commit()
+                        inserted_id = cur.lastrowid
+                except Exception as e:
+                    print(f"[DB INSERT WARN] -> {e}")
+                finally:
+                    conn.close()
+
+            new_entry = {
+                "id": inserted_id,
+                "user_id": user_id,
+                "name": name,
+                "photo_url": photo_url,
+                "login_time": "-",
+                "logout_time": time_str,
+                "duration": "00:00:00",
+                "status": "CHECKED OUT"
+            }
+            attendance_records.insert(0, new_entry)
+            return "logout_recorded", attendance_records
+
+        duration_calc = calculate_duration(str(active_record["login_time"]), now_ist)
+        active_record["logout_time"] = time_str
+        active_record["duration"] = duration_calc
+        active_record["status"] = "CHECKED OUT"
+        active_record["photo_url"] = photo_url
+
+        conn = get_mysql_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE attendance SET logout_time=%s, duration=%s, status=%s, photo_url=%s WHERE id=%s",
+                        (time_str, duration_calc, "CHECKED OUT", photo_url, active_record["id"])
+                    )
+                    conn.commit()
+            except Exception as e:
+                print(f"[DB UPDATE WARN] -> {e}")
+            finally:
+                conn.close()
+
+        return "logout_recorded", attendance_records
+
+    return "invalid_camera", attendance_records
+
+# ----------------- WEBSOCKET BROADCASTER -----------------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -111,143 +305,53 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        print(f"[*] Dashboard WebSocket Connected. Total clients: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-            print(f"[*] Dashboard WebSocket Disconnected. Remaining: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
         payload = json.dumps(message, default=str)
-        for connection in list(self.active_connections):
+        for conn in list(self.active_connections):
             try:
-                await connection.send_text(payload)
+                await conn.send_text(payload)
             except Exception:
                 pass
 
 manager = ConnectionManager()
 
-# ----------------- RECOGNITION ENGINE -----------------
-def extract_embedding(image_bytes: bytes):
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor = transform(img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        embedding = resnet(tensor).squeeze(0).cpu().numpy()
-    return embedding
-
-def match_face(embedding) -> tuple:
-    # Target matching logic
-    return ("EMP_001", KNOWN_USERS["EMP_001"]["name"])
-
-# ----------------- CORE ATTENDANCE LOGIC -----------------
-def record_attendance(user_id: str, name: str, camera_type: str):
-    global record_counter, attendance_records
-    now_ist = get_current_ist()
-    time_str = format_timestamp(now_ist)
-    
-    active_record = None
-    for r in reversed(attendance_records):
-        if r["user_id"] == user_id and r["status"] == "IN OFFICE":
-            active_record = r
-            break
-
-    if camera_type == "LOGIN":
-        if active_record:
-            return "already_logged_in", fetch_db_logs()
-
-        new_entry = {
-            "id": record_counter,
-            "user_id": user_id,
-            "name": name,
-            "login_time": time_str,
-            "logout_time": "-",
-            "duration": "-",
-            "status": "IN OFFICE"
-        }
-        record_counter += 1
-        attendance_records.insert(0, new_entry)
-        
-        conn = get_mysql_connection()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO attendance (user_id, name, login_time, status) VALUES (%s, %s, %s, %s)",
-                        (user_id, name, time_str, "IN OFFICE")
-                    )
-                    conn.commit()
-            except Exception as e:
-                print(f"[DB INSERT ERROR] -> {e}")
-            finally:
-                conn.close()
-
-        return "login_recorded", fetch_db_logs()
-
-    elif camera_type == "LOGOUT":
-        if not active_record:
-            new_entry = {
-                "id": record_counter,
-                "user_id": user_id,
-                "name": name,
-                "login_time": "-",
-                "logout_time": time_str,
-                "duration": "00:00:00",
-                "status": "CHECKED OUT"
-            }
-            record_counter += 1
-            attendance_records.insert(0, new_entry)
-            return "logout_recorded", fetch_db_logs()
-
-        active_record["logout_time"] = time_str
-        active_record["duration"] = calculate_duration(str(active_record["login_time"]), now_ist)
-        active_record["status"] = "CHECKED OUT"
-
-        conn = get_mysql_connection()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE attendance SET logout_time=%s, duration=%s, status=%s WHERE id=%s",
-                        (time_str, active_record["duration"], "CHECKED OUT", active_record["id"])
-                    )
-                    conn.commit()
-            except Exception as e:
-                print(f"[DB UPDATE ERROR] -> {e}")
-            finally:
-                conn.close()
-
-        return "logout_recorded", fetch_db_logs()
-
-    return "invalid_camera_type", fetch_db_logs()
-
-# ----------------- API ROUTES -----------------
+# ----------------- API ENDPOINTS -----------------
 @app.get("/")
 def root():
-    return {"message": "AI Face Attendance Backend Online", "time_ist": format_timestamp(get_current_ist())}
+    return {"status": "online", "time_ist": format_timestamp(get_current_ist())}
 
 @app.get("/attendance/logs")
 def get_logs():
-    return fetch_db_logs()
+    return attendance_records
 
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
     try:
         image_bytes = await file.read()
         embedding = extract_embedding(image_bytes)
-        user_id, name = match_face(embedding)
 
-        if not user_id:
-            return {"status": "face_not_recognized"}
+        # 1. Match or Create User ID
+        user_id, name, is_new = match_or_create_user(embedding, threshold=0.65)
 
-        action, current_logs = record_attendance(user_id, name, camera_type.upper())
+        # 2. Local folder me photo save karke URL generate karein
+        photo_url = save_photo_and_get_url(image_bytes, user_id, camera_type)
 
-        # WebSocket broadcast to Dashboard
+        # 3. Attendance mark karein
+        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url)
+
+        # 4. WebSocket se broadcast karein
         await manager.broadcast({
             "event": "ATTENDANCE_UPDATE",
             "action": action,
             "user_id": user_id,
             "name": name,
+            "photo_url": photo_url,
+            "is_new_user": is_new,
             "logs": current_logs
         })
 
@@ -255,6 +359,8 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
             "status": action,
             "user_id": user_id,
             "name": name,
+            "photo_url": photo_url,
+            "is_new_user": is_new,
             "timestamp": format_timestamp(get_current_ist())
         }
     except Exception as e:
@@ -265,11 +371,10 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        initial_data = fetch_db_logs()
         await websocket.send_text(json.dumps({
             "event": "ATTENDANCE_UPDATE",
             "action": "initial_load",
-            "logs": initial_data
+            "logs": attendance_records
         }, default=str))
         while True:
             await websocket.receive_text()

@@ -13,7 +13,7 @@ COOLDOWN_SECONDS = 4.0
 # CAM1: Entry RTSP (LOGIN)
 CAM1_CONFIG = {
     "name": "Office Entry Feed (Cam1 - LOGIN)",
-    "source": "rtsp://nidhin:Nidhin123@192.168.2.178:554/Streaming/Channels/101",
+    "source": "rtsp://nidhin:Nidhin123@192.168.2.179:554/Streaming/Channels/101",
     "type": "LOGIN",
     "box_color": (0, 255, 0)
 }
@@ -21,7 +21,7 @@ CAM1_CONFIG = {
 # CAM2: Exit RTSP (LOGOUT)
 CAM2_CONFIG = {
     "name": "Office Exit Feed (Cam2 - LOGOUT)",
-    "source": "rtsp://nidhin:Nidhin123@192.168.2.179:554/Streaming/Channels/102",
+    "source": "rtsp://nidhin:Nidhin123@192.168.2.178:554/Streaming/Channels/102",
     "type": "LOGOUT",
     "box_color": (0, 0, 255)
 }

@@ -110,10 +110,18 @@
 
             <button type="submit" class="login-btn">Sign In</button>
             <div id="errorMsg" class="error-msg">Invalid credentials</div>
+            <p style="text-align: center; margin-top: 16px; font-size: 12px; color: #64748b;">
+                Default Credentials: <code style="color: #94a3b8;">admin</code> / <code style="color: #94a3b8;">admin123</code>
+            </p>
         </form>
     </div>
 
     <script>
+        // Auto-redirect if already logged in
+        if (localStorage.getItem("auth_token")) {
+            window.location.href = "index.html";
+        }
+
         const loginForm = document.getElementById("loginForm");
         const errorMsg = document.getElementById("errorMsg");
 

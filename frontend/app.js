@@ -1,10 +1,3 @@
-
-function logout() {
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("admin_user");
-    window.location.href = "login.html";
-}
-
 // DOM Elements
 const tableBody = document.getElementById("logsTableBody");
 const totalRecordsCard = document.getElementById("totalRecords");
@@ -24,7 +17,7 @@ function renderDashboard(logs) {
     let checkedOutCount = 0;
 
     if (!logs || logs.length === 0) {
-        tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: #94a3b8;">No attendance records found yet.</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: #94a3b8;">No attendance records found yet.</td></tr>`;
         totalRecordsCard.innerText = "0";
         currentlyInOfficeCard.innerText = "0";
         checkedOutCard.innerText = "0";
@@ -39,7 +32,7 @@ function renderDashboard(logs) {
             checkedOutCount++;
         }
 
-        // Circular Avatar + Hover Preview Box
+        // Circular Face Avatar with Big Hover capability
         const avatarHtml = log.photo_url 
             ? `<div class="avatar-box">
                  <img src="${log.photo_url}" class="avatar-img" alt="face" onerror="this.parentElement.innerHTML='<div class=\\'avatar-fallback\\'>N/A</div>'">
@@ -59,6 +52,9 @@ function renderDashboard(logs) {
                 <span class="badge ${isInOffice ? 'badge-in' : 'badge-out'}">
                     ${isInOffice ? 'IN OFFICE' : 'CHECKED OUT'}
                 </span>
+            </td>
+            <td>
+                <span class="score-pill">${log.similarity_score || "-"}</span>
             </td>
         `;
         tableBody.appendChild(row);

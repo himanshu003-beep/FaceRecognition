@@ -74,10 +74,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Photo URL provide karne ke liye static directory mount
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
-# ----------------- AI MODEL & EMBEDDINGS -----------------
+# ----------------- AI MODEL SETUP -----------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
@@ -102,7 +101,7 @@ def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
         return 0.0
     return float(dot_product / (norm_a * norm_b))
 
-# ----------------- PERSISTENT STATE -----------------
+# ----------------- PERSISTENT STATE & MATCH ENGINE -----------------
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
 user_counter = 1
 attendance_records: List[Dict[str, Any]] = []
@@ -122,6 +121,7 @@ def init_db_and_load_state():
                     user_id VARCHAR(50) NOT NULL,
                     name VARCHAR(100) NOT NULL,
                     photo_url VARCHAR(255) DEFAULT '',
+                    similarity_score VARCHAR(20) DEFAULT '-',
                     login_time VARCHAR(50),
                     logout_time VARCHAR(50) DEFAULT '-',
                     duration VARCHAR(50) DEFAULT '-',
@@ -131,7 +131,7 @@ def init_db_and_load_state():
             """)
             conn.commit()
 
-            cur.execute("SELECT id, user_id, name, photo_url, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 100")
+            cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 100")
             rows = cur.fetchall()
             if rows:
                 attendance_records = rows
@@ -156,7 +156,8 @@ def init_db_and_load_state():
 
 init_db_and_load_state()
 
-def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.65) -> tuple[str, str, bool]:
+# THRESHOLD UPDATED TO 0.82 (Strict face matching)
+def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.82) -> tuple[str, str, float, bool]:
     global user_counter, REGISTERED_USERS
 
     best_user_id = None
@@ -171,11 +172,13 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.65
                 best_user_id = uid
                 best_name = data["name"]
 
+    # Agar match score 0.82 se zyada hai: Existing User Reuse
     if highest_score >= threshold and best_user_id:
         if len(REGISTERED_USERS[best_user_id]["embeddings"]) < 5:
             REGISTERED_USERS[best_user_id]["embeddings"].append(incoming_embedding)
-        return best_user_id, best_name, False
+        return best_user_id, best_name, highest_score, False
 
+    # Agar naya chehra hai: New User ID generate karein
     new_uid = f"EMP_{user_counter:03d}"
     new_name = f"Person_{user_counter}"
     user_counter += 1
@@ -184,12 +187,13 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.65
         "name": new_name,
         "embeddings": [incoming_embedding]
     }
-    print(f"[AUTO-REGISTERED] Generated New ID: {new_uid} for {new_name}")
-    return new_uid, new_name, True
+    # New user ke liye base score 1.0 ya captured highest store karein
+    final_score = 1.0 if highest_score < 0 else highest_score
+    print(f"[AUTO-REGISTERED] Created {new_uid} for {new_name} (Threshold check passed)")
+    return new_uid, new_name, final_score, True
 
-# ----------------- LOCAL PHOTO SAVE & URL -----------------
+# ----------------- LOCAL PHOTO SAVE -----------------
 def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -> str:
-    """Cropped image ko local disk par save karta hai aur web URL return karta hai"""
     timestamp = int(time.time() * 1000)
     filename = f"{user_id}_{camera_type.lower()}_{timestamp}.jpg"
     file_path = CAPTURES_DIR / filename
@@ -198,10 +202,11 @@ def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -
     return f"http://127.0.0.1:8000/captures/{filename}"
 
 # ----------------- ATTENDANCE ENGINE -----------------
-def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str):
+def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float):
     global attendance_records
     now_ist = get_current_ist()
     time_str = format_timestamp(now_ist)
+    score_display = f"{score:.3f}"
 
     active_record = None
     for r in attendance_records:
@@ -219,8 +224,8 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str)
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO attendance (user_id, name, photo_url, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (user_id, name, photo_url, time_str, "-", "-", "IN OFFICE")
+                        "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (user_id, name, photo_url, score_display, time_str, "-", "-", "IN OFFICE")
                     )
                     conn.commit()
                     inserted_id = cur.lastrowid
@@ -234,6 +239,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str)
             "user_id": user_id,
             "name": name,
             "photo_url": photo_url,
+            "similarity_score": score_display,
             "login_time": time_str,
             "logout_time": "-",
             "duration": "-",
@@ -250,8 +256,8 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str)
                 try:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "INSERT INTO attendance (user_id, name, photo_url, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                            (user_id, name, photo_url, "-", time_str, "00:00:00", "CHECKED OUT")
+                            "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (user_id, name, photo_url, score_display, "-", time_str, "00:00:00", "CHECKED OUT")
                         )
                         conn.commit()
                         inserted_id = cur.lastrowid
@@ -265,6 +271,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str)
                 "user_id": user_id,
                 "name": name,
                 "photo_url": photo_url,
+                "similarity_score": score_display,
                 "login_time": "-",
                 "logout_time": time_str,
                 "duration": "00:00:00",
@@ -278,14 +285,15 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str)
         active_record["duration"] = duration_calc
         active_record["status"] = "CHECKED OUT"
         active_record["photo_url"] = photo_url
+        active_record["similarity_score"] = score_display
 
         conn = get_mysql_connection()
         if conn:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE attendance SET logout_time=%s, duration=%s, status=%s, photo_url=%s WHERE id=%s",
-                        (time_str, duration_calc, "CHECKED OUT", photo_url, active_record["id"])
+                        "UPDATE attendance SET logout_time=%s, duration=%s, status=%s, photo_url=%s, similarity_score=%s WHERE id=%s",
+                        (time_str, duration_calc, "CHECKED OUT", photo_url, score_display, active_record["id"])
                     )
                     conn.commit()
             except Exception as e:
@@ -335,22 +343,23 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
         image_bytes = await file.read()
         embedding = extract_embedding(image_bytes)
 
-        # 1. Match or Create User ID
-        user_id, name, is_new = match_or_create_user(embedding, threshold=0.65)
+        # Strict Threshold >= 0.82 matching
+        user_id, name, score, is_new = match_or_create_user(incoming_embedding=embedding, threshold=0.82)
 
-        # 2. Local folder me photo save karke URL generate karein
+        # Photo save & URL generate
         photo_url = save_photo_and_get_url(image_bytes, user_id, camera_type)
 
-        # 3. Attendance mark karein
-        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url)
+        # Attendance record with similarity score
+        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score)
 
-        # 4. WebSocket se broadcast karein
+        # WebSocket live broadcast
         await manager.broadcast({
             "event": "ATTENDANCE_UPDATE",
             "action": action,
             "user_id": user_id,
             "name": name,
             "photo_url": photo_url,
+            "similarity_score": f"{score:.3f}",
             "is_new_user": is_new,
             "logs": current_logs
         })
@@ -359,7 +368,7 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
             "status": action,
             "user_id": user_id,
             "name": name,
-            "photo_url": photo_url,
+            "similarity_score": round(score, 3),
             "is_new_user": is_new,
             "timestamp": format_timestamp(get_current_ist())
         }

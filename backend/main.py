@@ -22,6 +22,10 @@ import pytz
 
 load_dotenv()
 
+# ----------------- LOCAL CAPTURES DIRECTORY -----------------
+CAPTURES_DIR = Path("captures")
+CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+
 # ----------------- TIMEZONE CONFIGURATION -----------------
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -58,7 +62,7 @@ def get_mysql_connection():
             connect_timeout=3
         )
     except Exception as err:
-        print(f"[DB WARNING] DB Connection error: {err}")
+        print(f"[DB WARNING] Connection error: {err}")
         return None
 
 # ----------------- APP INITIALIZATION -----------------
@@ -72,7 +76,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------- AI MODEL & EMBEDDINGS -----------------
+# ----------------- AI MODEL SETUP -----------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
@@ -136,6 +140,7 @@ def init_db_and_load_state():
             """)
             conn.commit()
 
+            # Load Registered Employees into Memory
             cur.execute("SELECT emp_id, name, embedding_json FROM employees")
             emp_rows = cur.fetchall()
             for er in emp_rows:
@@ -144,13 +149,14 @@ def init_db_and_load_state():
                     "name": er["name"],
                     "embeddings": [np.array(emb_list, dtype=np.float32)]
                 }
-            print(f"[*] Loaded {len(REGISTERED_USERS)} registered employees from database.")
+            print(f"[*] Successfully loaded {len(REGISTERED_USERS)} registered employees from DB.")
 
+            # Load Attendance History
             cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
             if rows:
                 attendance_records = rows
-                print(f"[*] Restored {len(attendance_records)} previous records from MySQL.")
+                print(f"[*] Restored {len(attendance_records)} attendance logs from DB.")
 
     except Exception as e:
         print(f"[DB INIT ERROR] -> {e}")
@@ -160,7 +166,7 @@ def init_db_and_load_state():
 init_db_and_load_state()
 
 # ----------------- VECTOR MATCH & UNKNOWN HANDLING -----------------
-def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.90) -> tuple[str, str, float, bool]:
+def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.85) -> tuple[str, str, float, bool]:
     best_user_id = None
     best_name = None
     highest_score = -1.0
@@ -173,15 +179,14 @@ def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.90) -> tu
                 best_user_id = uid
                 best_name = data["name"]
 
+    # Match threshold check (Strict matching without generating fake IDs)
     if highest_score >= threshold and best_user_id:
         return best_user_id, best_name, highest_score, False
 
     score_val = 0.0 if highest_score < 0 else highest_score
-    return "UNKNOWN", "Unknown Person", score_val, True
+    return "UNKNOWN", "Unknown Visitor", score_val, True
 
-# ----------------- IN-MEMORY BASE64 PHOTO URL (NO DISK SAVE) -----------------
 def convert_bytes_to_base64_data_url(image_bytes: bytes) -> str:
-    """Disk par file save kiye bina in-memory Base64 data URL generate karta hai"""
     b64_str = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:image/jpeg;base64,{b64_str}"
 
@@ -327,7 +332,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ----------------- API ENDPOINTS -----------------
+# ----------------- REST & ACTION ENDPOINTS -----------------
 @app.get("/")
 def root():
     return {"status": "online", "system": "Office Attendance", "time_ist": format_timestamp(get_current_ist())}
@@ -336,24 +341,23 @@ def root():
 def get_logs():
     return attendance_records
 
-# 1. DIRECT FOLDER OPENING API (Native OS File Manager)
+# 1. NATIVE SYSTEM FOLDER OPEN ACTION
 @app.post("/api/open-folder")
-def open_system_folder(folder_path: str = Form(None)):
-    """System me specific folder open karta hai bina files save kiye"""
-    target = folder_path if folder_path else str(Path.home())
+def open_system_folder():
+    target = str(CAPTURES_DIR.resolve())
     try:
-        current_os = platform.system()
-        if current_os == "Linux":
+        sys_name = platform.system()
+        if sys_name == "Linux":
             subprocess.Popen(["xdg-open", target])
-        elif current_os == "Darwin":  # macOS
+        elif sys_name == "Darwin":
             subprocess.Popen(["open", target])
-        elif current_os == "Windows":
+        elif sys_name == "Windows":
             subprocess.Popen(["explorer", target])
         return {"status": "success", "message": f"Opened folder: {target}"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
-# 2. EMPLOYEE REGISTRATION API
+# 2. EMPLOYEE REGISTRATION (Add Face Photo Once)
 @app.post("/api/employees/register")
 async def register_employee(emp_id: str = Form(...), name: str = Form(...), file: UploadFile = File(...)):
     try:
@@ -377,20 +381,20 @@ async def register_employee(emp_id: str = Form(...), name: str = Form(...), file
             finally:
                 conn.close()
 
-        return {"status": "success", "message": f"Employee {name} ({emp_id}) successfully registered!"}
+        print(f"[REGISTER SUCCESS] Added {emp_id} - {name} to Face Database.")
+        return {"status": "success", "message": f"Successfully Registered: {name} ({emp_id})"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# 3. LIVE ATTENDANCE PROCESS (In-Memory Base64 Data URL)
+# 3. LIVE ATTENDANCE PROCESS (Always Sends Live Cam Photo)
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
     try:
         image_bytes = await file.read()
         embedding = extract_embedding(image_bytes)
 
-        user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=0.90)
+        user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=0.85)
 
-        # In-Memory Stream Direct Display (Disk par save nahi hoga)
         photo_url = convert_bytes_to_base64_data_url(image_bytes)
 
         action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score, is_unknown)

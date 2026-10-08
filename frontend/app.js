@@ -9,7 +9,7 @@ let socket = null;
 let reconnectTimer = null;
 let currentAttendanceData = [];
 
-// Dashboard UI Render Function
+// Dashboard Table Render
 function renderDashboard(logs) {
     if (!tableBody) return;
     tableBody.innerHTML = "";
@@ -35,7 +35,6 @@ function renderDashboard(logs) {
             else checkedOutCount++;
         }
 
-        // WhatsApp Style Avatar + Side Pop-up Container
         const avatarBorderClass = isUnknown ? 'unknown-border' : '';
         const cardClass = isUnknown ? 'unknown-card' : '';
 
@@ -44,13 +43,12 @@ function renderDashboard(logs) {
                  <img src="${log.photo_url}" class="avatar-img ${avatarBorderClass}" alt="face" onerror="this.parentElement.innerHTML='<div class=\\'avatar-fallback\\'>N/A</div>'">
                  <div class="whatsapp-preview ${cardClass}">
                      <img src="${log.photo_url}" alt="preview">
-                     <div class="name-tag" style="${isUnknown ? 'color: #f87171;' : ''}">${log.name}</div>
-                     <div class="id-tag" style="${isUnknown ? 'color: #f87171;' : ''}">${log.user_id}</div>
+                     <div class="name-tag" style="${isUnknown ? 'color: #f87171;' : 'color: #38bdf8;'}">${log.name}</div>
+                     <div class="id-tag" style="${isUnknown ? 'color: #f87171;' : 'color: #94a3b8;'}">${log.user_id}</div>
                  </div>
                </div>`
             : `<div class="avatar-fallback">N/A</div>`;
 
-        // Status Badge Logic
         let statusBadgeHtml = '';
         if (isUnknown) {
             statusBadgeHtml = `<span class="badge badge-unknown">⚠️ UNKNOWN</span>`;
@@ -64,7 +62,7 @@ function renderDashboard(logs) {
         row.innerHTML = `
             <td>#${log.id}</td>
             <td>${avatarHtml}</td>
-            <td><strong style="${isUnknown ? 'color: #f87171;' : ''}">${log.user_id}</strong></td>
+            <td><strong style="${isUnknown ? 'color: #f87171;' : 'color: #38bdf8;'}">${log.user_id}</strong></td>
             <td>${log.name}</td>
             <td>${log.login_time || "-"}</td>
             <td>${log.logout_time || "-"}</td>
@@ -82,7 +80,7 @@ function renderDashboard(logs) {
     checkedOutCard.innerText = checkedOutCount;
 }
 
-// REST API Initial Data Fetch
+// Initial Data Fetch
 async function loadInitialData() {
     try {
         const response = await fetch("http://127.0.0.1:8000/attendance/logs");
@@ -95,7 +93,7 @@ async function loadInitialData() {
     }
 }
 
-// WebSocket Connection & Real-Time Events
+// WebSocket Connection
 function initWebSocket() {
     socket = new WebSocket("ws://127.0.0.1:8000/ws/attendance");
 
@@ -129,7 +127,7 @@ function initWebSocket() {
     };
 }
 
-// ----------------- MODAL & EMPLOYEE REGISTRATION -----------------
+// ----------------- MODAL ACTIONS -----------------
 function openRegisterModal() {
     registerModal.style.display = "flex";
 }
@@ -138,6 +136,7 @@ function closeRegisterModal() {
     registerModal.style.display = "none";
 }
 
+// ----------------- REGISTER EMPLOYEE -----------------
 async function handleRegister(e) {
     e.preventDefault();
     const empId = document.getElementById("regEmpId").value.trim();
@@ -172,7 +171,20 @@ async function handleRegister(e) {
     }
 }
 
-// ----------------- NATIVE CLIENT-SIDE EXCEL EXPORT -----------------
+// ----------------- NATIVE FOLDER OPEN ACTION -----------------
+async function openSystemFolder() {
+    try {
+        const res = await fetch("http://127.0.0.1:8000/api/open-folder", {
+            method: "POST"
+        });
+        const data = await res.json();
+        console.log(data.message);
+    } catch (err) {
+        console.error("Failed to open folder:", err);
+    }
+}
+
+// ----------------- EXCEL EXPORT -----------------
 function exportToExcel() {
     if (!currentAttendanceData || currentAttendanceData.length === 0) {
         alert("No attendance records to export!");

@@ -133,7 +133,7 @@ def run_streams():
             # 1. Clean copy taaki saved photo me drawings na aayein
             raw_clean_in = frame_in.copy()
             rgb_in = cv2.cvtColor(frame_in, cv2.COLOR_BGR2RGB)
-            boxes_in, _ = mtcnn.detect(rgb_in)
+            boxes_in, *_ = mtcnn.detect(rgb_in)
 
             if boxes_in is not None:
                 for box in boxes_in:
@@ -158,7 +158,7 @@ def run_streams():
         if ret_out and frame_out is not None:
             raw_clean_out = frame_out.copy()
             rgb_out = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)
-            boxes_out, _ = mtcnn.detect(rgb_out)
+            boxes_out, *_ = mtcnn.detect(rgb_out)
 
             if boxes_out is not None:
                 for box in boxes_out:

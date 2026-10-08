@@ -1,14 +1,16 @@
 import os
 import io
 import json
-import time
+import base64
+import platform
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 import pymysql
 from PIL import Image
 import numpy as np
@@ -20,9 +22,7 @@ import pytz
 
 load_dotenv()
 
-CAPTURES_DIR = Path("captures")
-CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
-
+# ----------------- TIMEZONE CONFIGURATION -----------------
 IST = pytz.timezone("Asia/Kolkata")
 
 def get_current_ist() -> datetime:
@@ -45,6 +45,7 @@ def calculate_duration(start_str: str, end_dt: datetime) -> str:
     except Exception:
         return "-"
 
+# ----------------- DATABASE CONNECTION -----------------
 def get_mysql_connection():
     try:
         return pymysql.connect(
@@ -60,7 +61,8 @@ def get_mysql_connection():
         print(f"[DB WARNING] DB Connection error: {err}")
         return None
 
-app = FastAPI(title="Office Attendance Backend")
+# ----------------- APP INITIALIZATION -----------------
+app = FastAPI(title="Office Attendance Core")
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,8 +72,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
-
+# ----------------- AI MODEL & EMBEDDINGS -----------------
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
@@ -96,12 +97,12 @@ def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
         return 0.0
     return float(dot_product / (norm_a * norm_b))
 
+# ----------------- IN-MEMORY STATE -----------------
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
-user_counter = 1
 attendance_records: List[Dict[str, Any]] = []
 
 def init_db_and_load_state():
-    global attendance_records, user_counter
+    global attendance_records, REGISTERED_USERS
     conn = get_mysql_connection()
     if not conn:
         print("[!] DB Offline. Starting with in-memory state.")
@@ -114,7 +115,7 @@ def init_db_and_load_state():
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     user_id VARCHAR(50) NOT NULL,
                     name VARCHAR(100) NOT NULL,
-                    photo_url VARCHAR(255) DEFAULT '',
+                    photo_url LONGTEXT,
                     similarity_score VARCHAR(20) DEFAULT '-',
                     login_time VARCHAR(50),
                     logout_time VARCHAR(50) DEFAULT '-',
@@ -123,25 +124,33 @@ def init_db_and_load_state():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS employees (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    emp_id VARCHAR(50) UNIQUE NOT NULL,
+                    name VARCHAR(100) NOT NULL,
+                    embedding_json LONGTEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
             conn.commit()
+
+            cur.execute("SELECT emp_id, name, embedding_json FROM employees")
+            emp_rows = cur.fetchall()
+            for er in emp_rows:
+                emb_list = json.loads(er["embedding_json"])
+                REGISTERED_USERS[er["emp_id"]] = {
+                    "name": er["name"],
+                    "embeddings": [np.array(emb_list, dtype=np.float32)]
+                }
+            print(f"[*] Loaded {len(REGISTERED_USERS)} registered employees from database.")
 
             cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
             if rows:
                 attendance_records = rows
-                print(f"[*] Successfully restored {len(attendance_records)} previous records from MySQL.")
-
-            cur.execute("SELECT user_id FROM attendance WHERE user_id LIKE 'EMP_%'")
-            emp_rows = cur.fetchall()
-            max_num = 0
-            for r in emp_rows:
-                try:
-                    num = int(r["user_id"].split("_")[1])
-                    if num > max_num:
-                        max_num = num
-                except Exception:
-                    pass
-            user_counter = max_num + 1
+                print(f"[*] Restored {len(attendance_records)} previous records from MySQL.")
 
     except Exception as e:
         print(f"[DB INIT ERROR] -> {e}")
@@ -150,10 +159,8 @@ def init_db_and_load_state():
 
 init_db_and_load_state()
 
-# STRICT THRESHOLD FIXED AT 0.90 (Scores below 0.90 will be rejected as existing match)
-def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.90) -> tuple[str, str, float, bool]:
-    global user_counter, REGISTERED_USERS
-
+# ----------------- VECTOR MATCH & UNKNOWN HANDLING -----------------
+def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.90) -> tuple[str, str, float, bool]:
     best_user_id = None
     best_name = None
     highest_score = -1.0
@@ -166,39 +173,39 @@ def match_or_create_user(incoming_embedding: np.ndarray, threshold: float = 0.90
                 best_user_id = uid
                 best_name = data["name"]
 
-    # Agar similarity strictly 0.90 ya usse zyada hai tabhi existing person match hoga
     if highest_score >= threshold and best_user_id:
-        if len(REGISTERED_USERS[best_user_id]["embeddings"]) < 5:
-            REGISTERED_USERS[best_user_id]["embeddings"].append(incoming_embedding)
         return best_user_id, best_name, highest_score, False
 
-    # 0.90 se kam score par system naya user id generate karega
-    new_uid = f"EMP_{user_counter:03d}"
-    new_name = f"Person_{user_counter}"
-    user_counter += 1
+    score_val = 0.0 if highest_score < 0 else highest_score
+    return "UNKNOWN", "Unknown Person", score_val, True
 
-    REGISTERED_USERS[new_uid] = {
-        "name": new_name,
-        "embeddings": [incoming_embedding]
-    }
-    final_score = 1.0 if highest_score < 0 else highest_score
-    print(f"[AUTO-REGISTERED] Created {new_uid} for {new_name} (Threshold check >= {threshold} strictly enforced)")
-    return new_uid, new_name, final_score, True
+# ----------------- IN-MEMORY BASE64 PHOTO URL (NO DISK SAVE) -----------------
+def convert_bytes_to_base64_data_url(image_bytes: bytes) -> str:
+    """Disk par file save kiye bina in-memory Base64 data URL generate karta hai"""
+    b64_str = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:image/jpeg;base64,{b64_str}"
 
-def save_photo_and_get_url(image_bytes: bytes, user_id: str, camera_type: str) -> str:
-    timestamp = int(time.time() * 1000)
-    filename = f"{user_id}_{camera_type.lower()}_{timestamp}.jpg"
-    file_path = CAPTURES_DIR / filename
-    
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img.save(file_path, "JPEG", quality=95, optimize=True)
-    return f"http://127.0.0.1:8000/captures/{filename}"
-
-def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float):
+# ----------------- ATTENDANCE ENGINE -----------------
+def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float, is_unknown: bool):
     global attendance_records
     now_ist = get_current_ist()
     time_str = format_timestamp(now_ist)
     score_display = f"{score:.3f}"
+
+    if is_unknown:
+        new_entry = {
+            "id": len(attendance_records) + 1,
+            "user_id": "UNKNOWN",
+            "name": "Unknown Visitor",
+            "photo_url": photo_url,
+            "similarity_score": score_display,
+            "login_time": time_str,
+            "logout_time": "-",
+            "duration": "-",
+            "status": "UNAUTHORIZED"
+        }
+        attendance_records.insert(0, new_entry)
+        return "unknown_detected", attendance_records
 
     active_record = None
     for r in attendance_records:
@@ -297,6 +304,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     return "invalid_camera", attendance_records
 
+# ----------------- WEBSOCKET BROADCASTER -----------------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -319,6 +327,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ----------------- API ENDPOINTS -----------------
 @app.get("/")
 def root():
     return {"status": "online", "system": "Office Attendance", "time_ist": format_timestamp(get_current_ist())}
@@ -327,16 +336,64 @@ def root():
 def get_logs():
     return attendance_records
 
+# 1. DIRECT FOLDER OPENING API (Native OS File Manager)
+@app.post("/api/open-folder")
+def open_system_folder(folder_path: str = Form(None)):
+    """System me specific folder open karta hai bina files save kiye"""
+    target = folder_path if folder_path else str(Path.home())
+    try:
+        current_os = platform.system()
+        if current_os == "Linux":
+            subprocess.Popen(["xdg-open", target])
+        elif current_os == "Darwin":  # macOS
+            subprocess.Popen(["open", target])
+        elif current_os == "Windows":
+            subprocess.Popen(["explorer", target])
+        return {"status": "success", "message": f"Opened folder: {target}"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+# 2. EMPLOYEE REGISTRATION API
+@app.post("/api/employees/register")
+async def register_employee(emp_id: str = Form(...), name: str = Form(...), file: UploadFile = File(...)):
+    try:
+        image_bytes = await file.read()
+        embedding = extract_embedding(image_bytes)
+
+        REGISTERED_USERS[emp_id] = {
+            "name": name,
+            "embeddings": [embedding]
+        }
+
+        conn = get_mysql_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "REPLACE INTO employees (emp_id, name, embedding_json) VALUES (%s, %s, %s)",
+                        (emp_id, name, json.dumps(embedding.tolist()))
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+
+        return {"status": "success", "message": f"Employee {name} ({emp_id}) successfully registered!"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# 3. LIVE ATTENDANCE PROCESS (In-Memory Base64 Data URL)
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
     try:
         image_bytes = await file.read()
         embedding = extract_embedding(image_bytes)
 
-        # STRICT THRESHOLD ENFORCED AT 0.90
-        user_id, name, score, is_new = match_or_create_user(incoming_embedding=embedding, threshold=0.90)
-        photo_url = save_photo_and_get_url(image_bytes, user_id, camera_type)
-        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score)
+        user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=0.90)
+
+        # In-Memory Stream Direct Display (Disk par save nahi hoga)
+        photo_url = convert_bytes_to_base64_data_url(image_bytes)
+
+        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score, is_unknown)
 
         await manager.broadcast({
             "event": "ATTENDANCE_UPDATE",
@@ -345,7 +402,7 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
             "name": name,
             "photo_url": photo_url,
             "similarity_score": f"{score:.3f}",
-            "is_new_user": is_new,
+            "is_unknown": is_unknown,
             "logs": current_logs
         })
 
@@ -354,7 +411,7 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
             "user_id": user_id,
             "name": name,
             "similarity_score": round(score, 3),
-            "is_new_user": is_new,
+            "is_unknown": is_unknown,
             "timestamp": format_timestamp(get_current_ist())
         }
     except Exception as e:

@@ -15,13 +15,12 @@ from PIL import Image
 import numpy as np
 import torch
 import torchvision.transforms as transforms
-from facenet_pytorch import InceptionResnetV1
+from facenet_pytorch import MTCNN, InceptionResnetV1
 from dotenv import load_dotenv
 import pytz
 
 load_dotenv()
 
-# Directories
 CAPTURES_DIR = Path("captures")
 UNKNOWN_DIR = CAPTURES_DIR / "unknown"
 EMPLOYEE_PHOTOS_DIR = Path("employee_photos")
@@ -63,10 +62,10 @@ def get_mysql_connection():
             connect_timeout=3
         )
     except Exception as err:
-        print(f"[DB WARNING] Connection error: {err}")
+        print(f"[DB ERROR] Connection failed: {err}")
         return None
 
-app = FastAPI(title="Office Attendance Core")
+app = FastAPI(title="Office Attendance AI Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,8 +78,9 @@ app.add_middleware(
 app.mount("/employee_photos", StaticFiles(directory=EMPLOYEE_PHOTOS_DIR), name="employee_photos")
 app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
-# FaceNet AI Setup
+# Deep Learning Setup
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+registration_mtcnn = MTCNN(image_size=160, margin=20, keep_all=False, device=device)
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 transform = transforms.Compose([
@@ -89,12 +89,27 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 
-def extract_embedding(image_bytes: bytes) -> np.ndarray:
+def extract_embedding_from_bytes(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     tensor = transform(img).unsqueeze(0).to(device)
     with torch.no_grad():
         embedding = resnet(tensor).squeeze(0).cpu().numpy()
     return embedding
+
+def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
+    """Detects face inside uploaded photo and extracts clean aligned embedding"""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    face_tensor = registration_mtcnn(img)
+    if face_tensor is None:
+        tensor = transform(img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            embedding = resnet(tensor).squeeze(0).cpu().numpy()
+        return embedding, img
+
+    face_tensor = face_tensor.unsqueeze(0).to(device)
+    with torch.no_grad():
+        embedding = resnet(face_tensor).squeeze(0).cpu().numpy()
+    return embedding, img
 
 def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     dot_product = float(np.dot(vec1, vec2))
@@ -103,19 +118,20 @@ def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     val = dot_product / (norm_a * norm_b)
-    return max(0.0, min(1.0, float(val)))
+    return float(max(0.0, min(1.0, val)))
 
-# Global In-Memory State
+# In-Memory & Tracking State
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
 attendance_records: List[Dict[str, Any]] = []
-last_unknown_capture_time = 0.0
-UNKNOWN_COOLDOWN = 600.0  # 10 minutes tak dubara capture nahi karega
+
+# Unknown History Tracker to recognize DIFFERENT unknown persons without spamming same one
+recent_unknown_vectors: List[Dict[str, Any]] = []
 
 def init_db_and_load_state():
     global attendance_records, REGISTERED_USERS
     conn = get_mysql_connection()
     if not conn:
-        print("[!] DB Offline. Starting with empty memory state.")
+        print("[!] DB Offline. Operating with local memory.")
         return
 
     try:
@@ -150,19 +166,25 @@ def init_db_and_load_state():
             cur.execute("SELECT emp_id, name, photo_url, embedding_json FROM employees")
             emp_rows = cur.fetchall()
             for er in emp_rows:
-                emb_list = json.loads(er["embedding_json"])
+                emb_data = json.loads(er["embedding_json"])
+                # Supports both single vector list and multiple vector list
+                if isinstance(emb_data[0], list):
+                    vec_list = [np.array(v, dtype=np.float32) for v in emb_data]
+                else:
+                    vec_list = [np.array(emb_data, dtype=np.float32)]
+
                 REGISTERED_USERS[er["emp_id"]] = {
                     "name": er["name"],
                     "photo_url": er.get("photo_url", ""),
-                    "embeddings": [np.array(emb_list, dtype=np.float32)]
+                    "embeddings": vec_list
                 }
-            print(f"[*] Loaded {len(REGISTERED_USERS)} registered employees from DB.")
+            print(f"[*] Loaded {len(REGISTERED_USERS)} registered employees from database.")
 
             cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
             if rows:
                 attendance_records = rows
-                print(f"[*] Restored {len(attendance_records)} attendance logs from DB.")
+                print(f"[*] Restored {len(attendance_records)} attendance logs from MySQL.")
     except Exception as e:
         print(f"[DB INIT ERROR] -> {e}")
     finally:
@@ -187,6 +209,23 @@ def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.82) -> tu
         return best_user_id, best_name, highest_score, False
 
     return "UNKNOWN", "Unknown Visitor", highest_score, True
+
+def check_is_new_unknown(incoming_embedding: np.ndarray) -> bool:
+    """Checks if this unknown person is different from recently captured unknown persons"""
+    global recent_unknown_vectors
+    current_time = time.time()
+    # Purge unknown records older than 10 minutes
+    recent_unknown_vectors = [u for u in recent_unknown_vectors if current_time - u["time"] < 600.0]
+
+    for item in recent_unknown_vectors:
+        score = calculate_cosine_similarity(incoming_embedding, item["vec"])
+        if score >= 0.80:
+            # Same unknown person still standing in front of camera
+            return False
+
+    # New unknown person detected
+    recent_unknown_vectors.append({"vec": incoming_embedding, "time": current_time})
+    return True
 
 def convert_bytes_to_base64_data_url(image_bytes: bytes) -> str:
     b64_str = base64.b64encode(image_bytes).decode("utf-8")
@@ -213,14 +252,15 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
             "name": "Unknown Visitor",
             "photo_url": photo_url,
             "similarity_score": score_display,
-            "login_time": time_str,
-            "logout_time": "-",
+            "login_time": time_str if camera_type == "LOGIN" else "-",
+            "logout_time": time_str if camera_type == "LOGOUT" else "-",
             "duration": "-",
             "status": "UNAUTHORIZED"
         }
         attendance_records.insert(0, new_entry)
         return "unknown_detected", attendance_records
 
+    # Registered Employee Logic
     active_record = None
     for r in attendance_records:
         if r["user_id"] == user_id and r["status"] == "IN OFFICE":
@@ -334,7 +374,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ----------------- ENDPOINTS -----------------
+# Endpoints
 @app.get("/")
 def root():
     return {"status": "online", "system": "Office Attendance", "time_ist": format_timestamp(get_current_ist())}
@@ -350,62 +390,74 @@ def list_employees():
         result.append({
             "emp_id": uid,
             "name": data["name"],
-            "photo_url": data.get("photo_url", "")
+            "photo_url": data.get("photo_url", ""),
+            "vector_count": len(data.get("embeddings", []))
         })
     return result
 
+# MULTIPLE PHOTO REGISTRATION ENDPOINT
 @app.post("/api/employees/register")
-async def register_employee(emp_id: str = Form(...), name: str = Form(...), file: UploadFile = File(...)):
+async def register_employee(emp_id: str = Form(...), name: str = Form(...), files: List[UploadFile] = File(...)):
     try:
-        image_bytes = await file.read()
-        embedding = extract_embedding(image_bytes)
+        embeddings_list = []
+        primary_photo_url = ""
 
-        # Save profile photo
-        filename = f"{emp_id}_{int(time.time())}.jpg"
-        filepath = EMPLOYEE_PHOTOS_DIR / filename
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img.save(filepath, "JPEG", quality=95)
-        photo_url = f"http://127.0.0.1:8000/employee_photos/{filename}"
+        for idx, file in enumerate(files):
+            image_bytes = await file.read()
+            emb, pil_img = extract_face_and_embedding_for_registration(image_bytes)
+            embeddings_list.append(emb)
 
+            # First photo saved as master profile photo
+            if idx == 0:
+                filename = f"{emp_id}_{int(time.time())}.jpg"
+                filepath = EMPLOYEE_PHOTOS_DIR / filename
+                pil_img.save(filepath, "JPEG", quality=95)
+                primary_photo_url = f"http://127.0.0.1:8000/employee_photos/{filename}"
+
+        if not embeddings_list:
+            return {"status": "error", "message": "No valid face photo provided."}
+
+        # Update in-memory vector store
         REGISTERED_USERS[emp_id] = {
             "name": name,
-            "photo_url": photo_url,
-            "embeddings": [embedding]
+            "photo_url": primary_photo_url,
+            "embeddings": embeddings_list
         }
 
+        # Persistent MySQL Save
         conn = get_mysql_connection()
         if conn:
             try:
                 with conn.cursor() as cur:
+                    json_payload = json.dumps([e.tolist() for e in embeddings_list])
                     cur.execute(
                         "REPLACE INTO employees (emp_id, name, photo_url, embedding_json) VALUES (%s, %s, %s, %s)",
-                        (emp_id, name, photo_url, json.dumps(embedding.tolist()))
+                        (emp_id, name, primary_photo_url, json_payload)
                     )
                     conn.commit()
             finally:
                 conn.close()
 
-        print(f"[REGISTERED] {emp_id} - {name} saved with photo.")
-        return {"status": "success", "message": f"Successfully Saved: {name} ({emp_id})"}
+        print(f"[REGISTERED] {emp_id} - {name} saved with {len(embeddings_list)} face samples.")
+        return {"status": "success", "message": f"Successfully Registered: {name} ({emp_id}) with {len(embeddings_list)} photos."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
-    global last_unknown_capture_time
     try:
         image_bytes = await file.read()
-        embedding = extract_embedding(image_bytes)
+        embedding = extract_embedding_from_bytes(image_bytes)
 
         user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=0.82)
 
-        # UNKNOWN 1-TIME CAPTURE FILTER: Do not spam capture if unknown repeats within 10 min
-        current_time = time.time()
         if is_unknown:
-            if current_time - last_unknown_capture_time < UNKNOWN_COOLDOWN:
-                return {"status": "ignored_unknown_cooldown", "score": round(score, 3)}
-            last_unknown_capture_time = current_time
-            # Save strictly inside unknown/ folder
+            # Check if this is a distinct unknown person or repeat spam
+            is_new_unknown = check_is_new_unknown(embedding)
+            if not is_new_unknown:
+                return {"status": "ignored_same_unknown_spam", "score": round(score, 3)}
+
+            # Save distinct unknown visitor in captures/unknown/
             photo_url = save_unknown_photo(image_bytes)
         else:
             photo_url = convert_bytes_to_base64_data_url(image_bytes)

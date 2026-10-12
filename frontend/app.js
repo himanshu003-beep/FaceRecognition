@@ -14,7 +14,6 @@ let reconnectTimer = null;
 let allAttendanceData = [];
 let activeFilter = "ALL";
 
-// Filter Setter
 function setFilter(filterType) {
     activeFilter = filterType;
     document.getElementById("filterAll").classList.toggle("active", filterType === "ALL");
@@ -23,7 +22,6 @@ function setFilter(filterType) {
     renderDashboard(allAttendanceData);
 }
 
-// Table Render
 function renderDashboard(logs) {
     if (!tableBody) return;
     tableBody.innerHTML = "";
@@ -40,7 +38,7 @@ function renderDashboard(logs) {
         }
         if (activeFilter === "EMPLOYEES") return !isUnk;
         if (activeFilter === "UNKNOWN") return isUnk;
-        return true; // ALL
+        return true;
     });
 
     totalRecordsCard.innerText = allAttendanceData.length;
@@ -60,12 +58,27 @@ function renderDashboard(logs) {
             ? `<span class="badge badge-unknown">⚠️ UNKNOWN</span>`
             : (isInOffice ? `<span class="badge badge-in">IN OFFICE</span>` : `<span class="badge badge-out">CHECKED OUT</span>`);
 
+        const avatarBorderClass = isUnknown ? 'unknown-border' : '';
+        const cardClass = isUnknown ? 'unknown-card' : '';
+
+        // Restored WhatsApp Style Floating Hover Card Structure
+        const avatarHtml = `
+            <div class="avatar-box">
+                <img src="${log.photo_url || ''}" class="avatar-img ${avatarBorderClass}" alt="face" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'40\\' height=\\'40\\' viewBox=\\'0 0 24 24\\' fill=\\'%23666\\'><circle cx=\\'12\\' cy=\\'12\\' r=\\'10\\'/></svg>'">
+                <div class="whatsapp-preview ${cardClass}">
+                    <img src="${log.photo_url || ''}" alt="preview">
+                    <div class="name-tag" style="${isUnknown ? 'color: #f87171;' : 'color: #38bdf8;'}">${log.name}</div>
+                    <div class="id-tag" style="${isUnknown ? 'color: #f87171;' : 'color: #94a3b8;'}">${log.user_id}</div>
+                </div>
+            </div>
+        `;
+
         const row = document.createElement("tr");
         row.onclick = () => showDetailModal(log);
 
         row.innerHTML = `
             <td>#${log.id}</td>
-            <td><img src="${log.photo_url || ''}" class="avatar-img ${isUnknown ? 'unknown-border' : ''}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'40\\' height=\\'40\\' viewBox=\\'0 0 24 24\\' fill=\\'%23666\\'><circle cx=\\'12\\' cy=\\'12\\' r=\\'10\\'/></svg>'"></td>
+            <td>${avatarHtml}</td>
             <td><strong style="${isUnknown ? 'color: #f87171;' : 'color: #38bdf8;'}">${log.user_id}</strong></td>
             <td>${log.name}</td>
             <td>${log.login_time || "-"}</td>
@@ -78,7 +91,6 @@ function renderDashboard(logs) {
     });
 }
 
-// Touch Detail Viewer
 function showDetailModal(log) {
     document.getElementById("detailImg").src = log.photo_url || "";
     document.getElementById("dLogId").innerText = `#${log.id}`;
@@ -94,7 +106,6 @@ function showDetailModal(log) {
 
 function closeDetailModal() { detailModal.style.display = "none"; }
 
-// REST & WebSocket Initializers
 async function loadInitialData() {
     try {
         const res = await fetch("http://127.0.0.1:8000/attendance/logs");
@@ -130,7 +141,6 @@ function initWebSocket() {
     };
 }
 
-// Modal Controllers
 function openRegisterModal() { registerModal.style.display = "flex"; }
 function closeRegisterModal() { registerModal.style.display = "none"; }
 
@@ -149,7 +159,7 @@ async function openEmployeeListModal() {
                     <img src="${emp.photo_url}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'40\\' height=\\'40\\' viewBox=\\'0 0 24 24\\' fill=\\'%23666\\'><circle cx=\\'12\\' cy=\\'12\\' r=\\'10\\'/></svg>'">
                     <div>
                         <strong style="color: #f1f5f9; display: block;">${emp.name}</strong>
-                        <span style="color: #38bdf8; font-size: 11px; font-family: monospace;">${emp.emp_id}</span>
+                        <span style="color: #38bdf8; font-size: 11px; font-family: monospace;">${emp.emp_id} (${emp.vector_count || 1} face samples)</span>
                     </div>
                 </div>
             </div>
@@ -160,17 +170,25 @@ async function openEmployeeListModal() {
 }
 function closeEmployeeListModal() { empListModal.style.display = "none"; }
 
-// Register Employee
+// Multiple Photo Registration Handler
 async function handleRegister(e) {
     e.preventDefault();
     const empId = document.getElementById("regEmpId").value.trim();
     const name = document.getElementById("regName").value.trim();
-    const file = document.getElementById("regPhoto").files[0];
+    const fileInput = document.getElementById("regPhotos");
+    const files = fileInput.files;
+
+    if (!files || files.length === 0) {
+        alert("Please select at least 1 photo.");
+        return;
+    }
 
     const formData = new FormData();
     formData.append("emp_id", empId);
     formData.append("name", name);
-    formData.append("file", file);
+    for (let i = 0; i < files.length; i++) {
+        formData.append("files", files[i]);
+    }
 
     try {
         const res = await fetch("http://127.0.0.1:8000/api/employees/register", {
@@ -184,30 +202,6 @@ async function handleRegister(e) {
             document.getElementById("registerForm").reset();
         } else alert(d.message);
     } catch (err) { alert(err); }
-}
-
-// "Open File" Handler
-function triggerOpenFileInput() {
-    document.getElementById("hiddenFileInput").click();
-}
-
-function handleFilePicked(event) {
-    const file = event.target.files[0];
-    if (file) {
-        alert(`File selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
-    }
-}
-
-// Export CSV
-function exportToExcel() {
-    if (!allAttendanceData.length) return alert("No records!");
-    const headers = ["Log ID", "User ID", "Name", "Login Time", "Logout Time", "Duration", "Status", "Match Score"];
-    const rows = allAttendanceData.map(l => [l.id, `"${l.user_id}"`, `"${l.name}"`, `"${l.login_time}"`, `"${l.logout_time}"`, `"${l.duration}"`, `"${l.status}"`, `"${l.similarity_score}"`]);
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-    const link = document.createElement("a");
-    link.href = encodeURI(csvContent);
-    link.download = `Attendance_${new Date().toISOString().slice(0,10)}.csv`;
-    link.click();
 }
 
 window.addEventListener("DOMContentLoaded", () => {

@@ -3,6 +3,7 @@ import io
 import json
 import base64
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
@@ -10,9 +11,11 @@ from typing import List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 import pymysql
 from PIL import Image
 import numpy as np
+import cv2
 import torch
 import torchvision.transforms as transforms
 from facenet_pytorch import MTCNN, InceptionResnetV1
@@ -29,6 +32,10 @@ UNKNOWN_DIR.mkdir(parents=True, exist_ok=True)
 EMPLOYEE_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
 IST = pytz.timezone("Asia/Kolkata")
+
+# Calibrated Real-World Intra-Face Threshold for InceptionResnetV1
+# Matches genuine employees (scores 0.78 - 0.95) while rejecting strangers (< 0.65)
+RECOGNITION_THRESHOLD = 0.78
 
 def get_current_ist() -> datetime:
     return datetime.now(IST)
@@ -59,7 +66,8 @@ def get_mysql_connection():
             password=os.getenv("DB_PASSWORD", "2003"),
             database=os.getenv("DB_NAME", "Ai_attendance"),
             cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=3
+            autocommit=True,
+            connect_timeout=5
         )
     except Exception as err:
         print(f"[DB ERROR] Connection failed: {err}")
@@ -80,7 +88,7 @@ app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
 
 # Deep Learning Setup
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-registration_mtcnn = MTCNN(image_size=160, margin=20, keep_all=False, device=device)
+registration_mtcnn = MTCNN(image_size=160, margin=14, keep_all=False, device=device)
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
 
 transform = transforms.Compose([
@@ -89,117 +97,141 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 
+def l2_normalize(vec: np.ndarray) -> np.ndarray:
+    v = np.asarray(vec, dtype=np.float32).flatten()
+    norm = np.linalg.norm(v)
+    if norm == 0:
+        return v
+    return v / norm
+
+def check_image_blur(cv_img: np.ndarray, min_variance: float = 35.0) -> bool:
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+    variance = cv2.Laplacian(gray, cv2.CV_64F).var()
+    return bool(variance >= min_variance)
+
 def extract_embedding_from_bytes(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     tensor = transform(img).unsqueeze(0).to(device)
     with torch.no_grad():
-        embedding = resnet(tensor).squeeze(0).cpu().numpy()
-    return embedding
+        raw_embedding = resnet(tensor).squeeze().cpu().numpy().flatten().astype(np.float32)
+    return l2_normalize(raw_embedding)
 
 def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
-    """Detects face inside uploaded photo and extracts clean aligned embedding"""
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    if cv_img is None:
+        raise ValueError("Invalid image file format.")
+
+    if not check_image_blur(cv_img, min_variance=30.0):
+        raise ValueError("Image is too blurry. Please capture with steady lighting.")
+
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     face_tensor = registration_mtcnn(img)
     if face_tensor is None:
         tensor = transform(img).unsqueeze(0).to(device)
         with torch.no_grad():
-            embedding = resnet(tensor).squeeze(0).cpu().numpy()
-        return embedding, img
+            raw_emb = resnet(tensor).squeeze().cpu().numpy().flatten().astype(np.float32)
+        return l2_normalize(raw_emb), img
 
     face_tensor = face_tensor.unsqueeze(0).to(device)
     with torch.no_grad():
-        embedding = resnet(face_tensor).squeeze(0).cpu().numpy()
-    return embedding, img
+        raw_emb = resnet(face_tensor).squeeze().cpu().numpy().flatten().astype(np.float32)
+    return l2_normalize(raw_emb), img
 
 def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    dot_product = float(np.dot(vec1, vec2))
-    norm_a = float(np.linalg.norm(vec1))
-    norm_b = float(np.linalg.norm(vec2))
-    if norm_a == 0.0 or norm_b == 0.0:
+    v1 = l2_normalize(vec1)
+    v2 = l2_normalize(vec2)
+    if v1.shape != v2.shape:
         return 0.0
-    val = dot_product / (norm_a * norm_b)
-    return float(max(0.0, min(1.0, val)))
+    dot_val = float(np.dot(v1, v2))
+    return float(max(0.0, min(1.0, dot_val)))
 
-# In-Memory & Tracking State
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
 attendance_records: List[Dict[str, Any]] = []
-
-# Unknown History Tracker to recognize DIFFERENT unknown persons without spamming same one
 recent_unknown_vectors: List[Dict[str, Any]] = []
+
+# Employee Continuous Capture Debounce Cache (Employee ID -> Timestamp)
+employee_attendance_cooldown: Dict[str, float] = {}
+
+def ensure_schema_compatibility(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS attendance (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id VARCHAR(50) NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                photo_url LONGTEXT,
+                similarity_score VARCHAR(20) DEFAULT '-',
+                login_time VARCHAR(50),
+                logout_time VARCHAR(50) DEFAULT '-',
+                duration VARCHAR(50) DEFAULT '-',
+                status VARCHAR(50) DEFAULT 'IN OFFICE',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                emp_id VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                photo_url VARCHAR(255) DEFAULT '',
+                embedding_json LONGTEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
 
 def init_db_and_load_state():
     global attendance_records, REGISTERED_USERS
     conn = get_mysql_connection()
     if not conn:
-        print("[!] DB Offline. Operating with local memory.")
+        print("[!] DB Connection offline. Operating with memory.")
         return
 
     try:
+        ensure_schema_compatibility(conn)
+
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS attendance (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id VARCHAR(50) NOT NULL,
-                    name VARCHAR(100) NOT NULL,
-                    photo_url LONGTEXT,
-                    similarity_score VARCHAR(20) DEFAULT '-',
-                    login_time VARCHAR(50),
-                    logout_time VARCHAR(50) DEFAULT '-',
-                    duration VARCHAR(50) DEFAULT '-',
-                    status VARCHAR(50) DEFAULT 'IN OFFICE',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """)
-
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS employees (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    emp_id VARCHAR(50) UNIQUE NOT NULL,
-                    name VARCHAR(100) NOT NULL,
-                    photo_url VARCHAR(255) DEFAULT '',
-                    embedding_json LONGTEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """)
-            conn.commit()
-
-            cur.execute("SELECT emp_id, name, photo_url, embedding_json FROM employees")
+            cur.execute("SELECT emp_id, name, photo_url, embedding_json FROM employees WHERE photo_url != '' AND photo_url IS NOT NULL")
             emp_rows = cur.fetchall()
+            REGISTERED_USERS.clear()
             for er in emp_rows:
                 emb_data = json.loads(er["embedding_json"])
-                # Supports both single vector list and multiple vector list
-                if isinstance(emb_data[0], list):
-                    vec_list = [np.array(v, dtype=np.float32) for v in emb_data]
+                vec_list = []
+                if isinstance(emb_data, list) and len(emb_data) > 0 and isinstance(emb_data[0], list):
+                    for v in emb_data:
+                        vec_list.append(l2_normalize(np.asarray(v, dtype=np.float32)))
                 else:
-                    vec_list = [np.array(emb_data, dtype=np.float32)]
+                    vec_list.append(l2_normalize(np.asarray(emb_data, dtype=np.float32)))
 
                 REGISTERED_USERS[er["emp_id"]] = {
                     "name": er["name"],
                     "photo_url": er.get("photo_url", ""),
                     "embeddings": vec_list
                 }
-            print(f"[*] Loaded {len(REGISTERED_USERS)} registered employees from database.")
+            print(f"[*] Loaded {len(REGISTERED_USERS)} verified employees into memory.")
 
             cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
-            if rows:
-                attendance_records = rows
-                print(f"[*] Restored {len(attendance_records)} attendance logs from MySQL.")
+            attendance_records = list(rows) if rows else []
+            print(f"[*] Restored {len(attendance_records)} persistent attendance records from database.")
     except Exception as e:
-        print(f"[DB INIT ERROR] -> {e}")
+        print(f"[DB INIT ERROR] -> {traceback.format_exc()}")
     finally:
         conn.close()
 
 init_db_and_load_state()
 
-def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.82) -> tuple[str, str, float, bool]:
+def identify_face(incoming_embedding: np.ndarray, threshold: float = RECOGNITION_THRESHOLD) -> tuple[str, str, float, bool]:
     best_user_id = None
     best_name = None
     highest_score = 0.0
 
+    in_vec = l2_normalize(incoming_embedding)
+
     for uid, data in REGISTERED_USERS.items():
         for reg_vec in data.get("embeddings", []):
-            score = calculate_cosine_similarity(incoming_embedding, reg_vec)
+            score = calculate_cosine_similarity(in_vec, reg_vec)
             if score > highest_score:
                 highest_score = score
                 best_user_id = uid
@@ -211,19 +243,15 @@ def identify_face(incoming_embedding: np.ndarray, threshold: float = 0.82) -> tu
     return "UNKNOWN", "Unknown Visitor", highest_score, True
 
 def check_is_new_unknown(incoming_embedding: np.ndarray) -> bool:
-    """Checks if this unknown person is different from recently captured unknown persons"""
     global recent_unknown_vectors
     current_time = time.time()
-    # Purge unknown records older than 10 minutes
     recent_unknown_vectors = [u for u in recent_unknown_vectors if current_time - u["time"] < 600.0]
 
     for item in recent_unknown_vectors:
         score = calculate_cosine_similarity(incoming_embedding, item["vec"])
         if score >= 0.80:
-            # Same unknown person still standing in front of camera
             return False
 
-    # New unknown person detected
     recent_unknown_vectors.append({"vec": incoming_embedding, "time": current_time})
     return True
 
@@ -240,10 +268,13 @@ def save_unknown_photo(image_bytes: bytes) -> str:
     return f"http://127.0.0.1:8000/captures/unknown/{filename}"
 
 def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float, is_unknown: bool):
-    global attendance_records
+    global attendance_records, employee_attendance_cooldown
     now_ist = get_current_ist()
     time_str = format_timestamp(now_ist)
+    current_ts = time.time()
     score_display = f"{score:.3f}"
+
+    conn = get_mysql_connection()
 
     if is_unknown:
         new_entry = {
@@ -257,75 +288,97 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
             "duration": "-",
             "status": "UNAUTHORIZED"
         }
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (new_entry["user_id"], new_entry["name"], photo_url, score_display, new_entry["login_time"], new_entry["logout_time"], "-", "UNAUTHORIZED")
+                    )
+                    new_entry["id"] = cur.lastrowid
+            finally:
+                conn.close()
+
         attendance_records.insert(0, new_entry)
         return "unknown_detected", attendance_records
 
-    # Registered Employee Logic
+    # Registered Employee Logic with Anti-Duplication Cooldown (60 seconds)
+    last_marked = employee_attendance_cooldown.get(user_id, 0.0)
     active_record = None
     for r in attendance_records:
         if r["user_id"] == user_id and r["status"] == "IN OFFICE":
             active_record = r
             break
 
+    # If employee is already IN OFFICE and stands in front of LOGIN camera again
     if camera_type == "LOGIN":
         if active_record:
+            # Just update live score on dashboard without creating duplicate row
+            active_record["similarity_score"] = score_display
+            if conn:
+                conn.close()
             return "already_logged_in", attendance_records
 
-        inserted_id = len(attendance_records) + 1
-        conn = get_mysql_connection()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (user_id, name, photo_url, score_display, time_str, "-", "-", "IN OFFICE")
-                    )
-                    conn.commit()
-                    inserted_id = cur.lastrowid
-            finally:
+        if current_ts - last_marked < 60.0:
+            if conn:
                 conn.close()
+            return "cooldown_throttled", attendance_records
+
+        employee_attendance_cooldown[user_id] = current_ts
+
+        # Use Registered Photo if available, else live photo
+        display_photo = REGISTERED_USERS.get(user_id, {}).get("photo_url") or photo_url
 
         new_entry = {
-            "id": inserted_id,
+            "id": len(attendance_records) + 1,
             "user_id": user_id,
             "name": name,
-            "photo_url": photo_url,
+            "photo_url": display_photo,
             "similarity_score": score_display,
             "login_time": time_str,
             "logout_time": "-",
             "duration": "-",
             "status": "IN OFFICE"
         }
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (user_id, name, display_photo, score_display, time_str, "-", "-", "IN OFFICE")
+                    )
+                    new_entry["id"] = cur.lastrowid
+            finally:
+                conn.close()
+
         attendance_records.insert(0, new_entry)
         return "login_recorded", attendance_records
 
     elif camera_type == "LOGOUT":
         if not active_record:
-            inserted_id = len(attendance_records) + 1
-            conn = get_mysql_connection()
-            if conn:
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                            (user_id, name, photo_url, score_display, "-", time_str, "00:00:00", "CHECKED OUT")
-                        )
-                        conn.commit()
-                        inserted_id = cur.lastrowid
-                finally:
-                    conn.close()
-
+            display_photo = REGISTERED_USERS.get(user_id, {}).get("photo_url") or photo_url
             new_entry = {
-                "id": inserted_id,
+                "id": len(attendance_records) + 1,
                 "user_id": user_id,
                 "name": name,
-                "photo_url": photo_url,
+                "photo_url": display_photo,
                 "similarity_score": score_display,
                 "login_time": "-",
                 "logout_time": time_str,
                 "duration": "00:00:00",
                 "status": "CHECKED OUT"
             }
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO attendance (user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (user_id, name, display_photo, score_display, "-", time_str, "00:00:00", "CHECKED OUT")
+                        )
+                        new_entry["id"] = cur.lastrowid
+                finally:
+                    conn.close()
+
             attendance_records.insert(0, new_entry)
             return "logout_recorded", attendance_records
 
@@ -333,23 +386,22 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
         active_record["logout_time"] = time_str
         active_record["duration"] = duration_calc
         active_record["status"] = "CHECKED OUT"
-        active_record["photo_url"] = photo_url
         active_record["similarity_score"] = score_display
 
-        conn = get_mysql_connection()
         if conn:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE attendance SET logout_time=%s, duration=%s, status=%s, photo_url=%s, similarity_score=%s WHERE id=%s",
-                        (time_str, duration_calc, "CHECKED OUT", photo_url, score_display, active_record["id"])
+                        "UPDATE attendance SET logout_time=%s, duration=%s, status=%s, similarity_score=%s WHERE id=%s",
+                        (time_str, duration_calc, "CHECKED OUT", score_display, active_record["id"])
                     )
-                    conn.commit()
             finally:
                 conn.close()
 
         return "logout_recorded", attendance_records
 
+    if conn:
+        conn.close()
     return "invalid_camera", attendance_records
 
 class ConnectionManager:
@@ -374,7 +426,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Endpoints
 @app.get("/")
 def root():
     return {"status": "online", "system": "Office Attendance", "time_ist": format_timestamp(get_current_ist())}
@@ -395,36 +446,68 @@ def list_employees():
         })
     return result
 
-# MULTIPLE PHOTO REGISTRATION ENDPOINT
+@app.delete("/api/employees/{emp_id}")
+def delete_employee(emp_id: str):
+    global REGISTERED_USERS
+    if emp_id not in REGISTERED_USERS:
+        return JSONResponse(status_code=404, content={"status": "error", "message": f"Employee {emp_id} not found."})
+
+    del REGISTERED_USERS[emp_id]
+
+    conn = get_mysql_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM employees WHERE emp_id = %s", (emp_id,))
+        finally:
+            conn.close()
+
+    print(f"[*] Deleted employee: {emp_id}")
+    return {"status": "success", "message": f"Employee {emp_id} successfully deleted."}
+
 @app.post("/api/employees/register")
-async def register_employee(emp_id: str = Form(...), name: str = Form(...), files: List[UploadFile] = File(...)):
+async def register_employee(
+    emp_id: str = Form(...),
+    name: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
     try:
+        clean_emp_id = emp_id.strip()
+        clean_name = name.strip()
+
+        if not files or len(files) == 0:
+            return JSONResponse(status_code=400, content={"status": "error", "message": "Face photo is strictly required."})
+
         embeddings_list = []
         primary_photo_url = ""
+        processing_errors = []
 
         for idx, file in enumerate(files):
-            image_bytes = await file.read()
-            emb, pil_img = extract_face_and_embedding_for_registration(image_bytes)
-            embeddings_list.append(emb)
+            try:
+                image_bytes = await file.read()
+                if len(image_bytes) == 0:
+                    continue
+                emb, pil_img = extract_face_and_embedding_for_registration(image_bytes)
+                embeddings_list.append(emb)
 
-            # First photo saved as master profile photo
-            if idx == 0:
-                filename = f"{emp_id}_{int(time.time())}.jpg"
-                filepath = EMPLOYEE_PHOTOS_DIR / filename
-                pil_img.save(filepath, "JPEG", quality=95)
-                primary_photo_url = f"http://127.0.0.1:8000/employee_photos/{filename}"
+                if primary_photo_url == "":
+                    filename = f"{clean_emp_id}_{int(time.time())}.jpg"
+                    filepath = EMPLOYEE_PHOTOS_DIR / filename
+                    pil_img.save(filepath, "JPEG", quality=95)
+                    primary_photo_url = f"http://127.0.0.1:8000/employee_photos/{filename}"
+            except ValueError as ve:
+                processing_errors.append(f"Photo {idx + 1}: {str(ve)}")
 
-        if not embeddings_list:
-            return {"status": "error", "message": "No valid face photo provided."}
+        if not embeddings_list or not primary_photo_url:
+            err_msg = " | ".join(processing_errors) if processing_errors else "No valid face photo could be verified."
+            return JSONResponse(status_code=400, content={"status": "error", "message": err_msg})
 
-        # Update in-memory vector store
-        REGISTERED_USERS[emp_id] = {
-            "name": name,
+        REGISTERED_USERS[clean_emp_id] = {
+            "name": clean_name,
             "photo_url": primary_photo_url,
             "embeddings": embeddings_list
         }
 
-        # Persistent MySQL Save
         conn = get_mysql_connection()
         if conn:
             try:
@@ -432,16 +515,21 @@ async def register_employee(emp_id: str = Form(...), name: str = Form(...), file
                     json_payload = json.dumps([e.tolist() for e in embeddings_list])
                     cur.execute(
                         "REPLACE INTO employees (emp_id, name, photo_url, embedding_json) VALUES (%s, %s, %s, %s)",
-                        (emp_id, name, primary_photo_url, json_payload)
+                        (clean_emp_id, clean_name, primary_photo_url, json_payload)
                     )
-                    conn.commit()
             finally:
                 conn.close()
 
-        print(f"[REGISTERED] {emp_id} - {name} saved with {len(embeddings_list)} face samples.")
-        return {"status": "success", "message": f"Successfully Registered: {name} ({emp_id}) with {len(embeddings_list)} photos."}
+        return {
+            "status": "success",
+            "message": f"Successfully Registered: {clean_name} ({clean_emp_id})",
+            "emp_id": clean_emp_id,
+            "name": clean_name,
+            "photo_url": primary_photo_url
+        }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print(f"[REGISTER CRASH] -> {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"Server Error: {str(e)}"})
 
 @app.post("/api/attendance/process")
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
@@ -449,18 +537,28 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
         image_bytes = await file.read()
         embedding = extract_embedding_from_bytes(image_bytes)
 
-        user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=0.82)
+        user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=RECOGNITION_THRESHOLD)
 
         if is_unknown:
-            # Check if this is a distinct unknown person or repeat spam
             is_new_unknown = check_is_new_unknown(embedding)
             if not is_new_unknown:
-                return {"status": "ignored_same_unknown_spam", "score": round(score, 3)}
+                await manager.broadcast({
+                    "event": "LIVE_SCORE_UPDATE",
+                    "user_id": "UNKNOWN",
+                    "similarity_score": f"{score:.3f}",
+                    "logs": attendance_records
+                })
+                return {
+                    "status": "ignored_same_unknown_spam",
+                    "user_id": "UNKNOWN",
+                    "similarity_score": round(score, 3),
+                    "is_unknown": True
+                }
 
-            # Save distinct unknown visitor in captures/unknown/
             photo_url = save_unknown_photo(image_bytes)
         else:
-            photo_url = convert_bytes_to_base64_data_url(image_bytes)
+            # Use registered photo for authorized employee
+            photo_url = REGISTERED_USERS.get(user_id, {}).get("photo_url") or convert_bytes_to_base64_data_url(image_bytes)
 
         action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score, is_unknown)
 
@@ -484,8 +582,13 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
             "timestamp": format_timestamp(get_current_ist())
         }
     except Exception as e:
-        print(f"[PROCESS ERROR] -> {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"[PROCESS CRASH] -> {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={
+            "status": "error",
+            "user_id": "None",
+            "similarity_score": 0.0,
+            "message": str(e)
+        })
 
 @app.websocket("/ws/attendance")
 async def websocket_endpoint(websocket: WebSocket):

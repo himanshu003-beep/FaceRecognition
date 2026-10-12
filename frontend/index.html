@@ -56,6 +56,19 @@
         .btn-list { background: #8b5cf6; color: white; }
         .btn-list:hover { background: #7c3aed; transform: translateY(-1px); }
 
+        .btn-delete {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 5px 10px;
+            font-size: 11px;
+            border-radius: 6px;
+        }
+        .btn-delete:hover {
+            background: #ef4444;
+            color: white;
+        }
+
         .live-dot {
             width: 14px;
             height: 14px;
@@ -70,7 +83,6 @@
             box-shadow: 0 0 14px #22c55e;
         }
 
-        /* Filter Tabs */
         .filter-bar {
             display: flex;
             gap: 8px;
@@ -93,7 +105,6 @@
             border-color: #38bdf8;
         }
 
-        /* Stat Cards */
         .cards-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -114,7 +125,6 @@
         }
         .card p { font-size: 28px; font-weight: 700; }
 
-        /* Table */
         .table-container {
             background: rgba(17, 24, 39, 0.7);
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -142,7 +152,6 @@
             background: rgba(56, 189, 248, 0.08);
         }
 
-        /* WhatsApp Hover Preview */
         .avatar-box {
             position: relative;
             display: inline-block;
@@ -230,12 +239,11 @@
             border-radius: 4px;
         }
 
-        /* Modal Base */
         .modal {
             display: none;
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.75);
+            background: rgba(0,0,0,0.78);
             backdrop-filter: blur(4px);
             z-index: 2000;
             justify-content: center;
@@ -246,11 +254,11 @@
             padding: 24px;
             border-radius: 12px;
             border: 1px solid rgba(255,255,255,0.1);
-            width: 440px;
+            width: 480px;
             max-height: 85vh;
             overflow-y: auto;
         }
-        .modal-content input {
+        .modal-content input[type="text"] {
             width: 100%;
             padding: 10px;
             margin-bottom: 12px;
@@ -260,7 +268,6 @@
             border-radius: 6px;
         }
 
-        /* Detail Drawer Modal */
         .detail-card { text-align: center; }
         .detail-card img {
             width: 130px;
@@ -290,15 +297,15 @@
             margin-bottom: 2px;
         }
 
-        /* Employee Directory List */
         .emp-list-item {
             display: flex;
             align-items: center;
             justify-content: space-between;
             background: #0f172a;
-            padding: 10px;
+            padding: 12px;
             border-radius: 8px;
             margin-bottom: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
         }
         .emp-list-item img {
             width: 45px;
@@ -306,6 +313,95 @@
             border-radius: 50%;
             object-fit: cover;
             margin-right: 12px;
+            border: 2px solid #38bdf8;
+        }
+
+        .photo-action-menu {
+            position: relative;
+            display: inline-block;
+            margin-bottom: 12px;
+        }
+        .photo-dropdown {
+            display: none;
+            position: absolute;
+            top: 105%;
+            left: 0;
+            background: #0f172a;
+            border: 1px solid #38bdf8;
+            border-radius: 8px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            z-index: 100;
+            width: 220px;
+        }
+        .photo-dropdown.show { display: block; }
+        .photo-dropdown button {
+            width: 100%;
+            padding: 10px 14px;
+            text-align: left;
+            background: none;
+            border: none;
+            color: #f8fafc;
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .photo-dropdown button:hover {
+            background: rgba(56, 189, 248, 0.15);
+            color: #38bdf8;
+        }
+        .selected-photos-preview {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 14px;
+            min-height: 50px;
+            background: #0f172a;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px dashed #334155;
+        }
+        .thumb-preview-wrap {
+            position: relative;
+            width: 50px;
+            height: 50px;
+        }
+        .thumb-preview-wrap img {
+            width: 100%;
+            height: 100%;
+            border-radius: 6px;
+            object-fit: cover;
+            border: 1px solid #38bdf8;
+        }
+        .thumb-preview-wrap .del-btn {
+            position: absolute;
+            top: -4px;
+            right: -4px;
+            background: #ef4444;
+            color: white;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            font-size: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .camera-container {
+            width: 100%;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+            position: relative;
+            margin-bottom: 12px;
+        }
+        .camera-container video, .camera-container canvas {
+            width: 100%;
+            height: 240px;
+            object-fit: cover;
+            display: block;
         }
     </style>
 </head>
@@ -367,26 +463,62 @@
         </table>
     </div>
 
-    <!-- Registration Modal (With Multiple Photo Upload) -->
+    <!-- Register Modal -->
     <div id="registerModal" class="modal">
         <div class="modal-content">
-            <h3 style="color: #38bdf8; margin-bottom: 14px;">Register / Update Employee</h3>
+            <h3 style="color: #38bdf8; margin-bottom: 14px;">Register New Employee</h3>
+            <div style="font-size: 11px; color: #94a3b8; margin-bottom: 12px; background: rgba(56, 189, 248, 0.08); padding: 8px; border-radius: 6px;">
+                💡 <strong>Important:</strong> Photo is strictly required. Ensure direct lighting on the face without blur.
+            </div>
             <form id="registerForm" onsubmit="handleRegister(event)">
                 <input type="text" id="regEmpId" placeholder="Employee ID (e.g. EMP_001)" required>
-                <input type="text" id="regName" placeholder="Full Name (e.g. Rahul Sharma)" required>
-                <label style="font-size: 12px; color: #94a3b8; display: block; margin-bottom: 4px;">Face Photos (Select 1 or Multiple angles):</label>
-                <input type="file" id="regPhotos" accept="image/*" multiple required>
-                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
+                <input type="text" id="regName" placeholder="Full Name (e.g. Himanshu Shukla)" required>
+                
+                <div class="photo-action-menu">
+                    <button type="button" class="btn" style="background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8;" onclick="togglePhotoMenu()">
+                        ➕ Add Photo(s) *
+                    </button>
+                    <div id="photoDropdown" class="photo-dropdown">
+                        <button type="button" onclick="triggerFileInput()">📁 Upload from System</button>
+                        <button type="button" onclick="openLiveCameraModal()">📸 Capture Live Photo</button>
+                    </div>
+                </div>
+                <input type="file" id="regPhotos" accept="image/*" multiple style="display: none;" onchange="handleSystemFilePicked(event)">
+
+                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Face Photos:</div>
+                <div id="selectedPhotosContainer" class="selected-photos-preview">
+                    <span style="font-size: 11px; color: #64748b; margin: auto;">No photos added yet (Mandatory)</span>
+                </div>
+
+                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;">
                     <button type="button" class="btn" style="background: #334155; color: white;" onclick="closeRegisterModal()">Cancel</button>
-                    <button type="submit" class="btn btn-add">Save Employee</button>
+                    <button type="submit" id="saveEmpBtn" class="btn btn-add">Save Employee</button>
                 </div>
             </form>
         </div>
     </div>
 
-    <!-- Employee Directory Modal -->
+    <!-- Live Camera Modal -->
+    <div id="liveCameraModal" class="modal">
+        <div class="modal-content" style="width: 400px; text-align: center;">
+            <h3 style="color: #38bdf8; margin-bottom: 12px;">Live Face Capture</h3>
+            <div class="camera-container">
+                <video id="webcamVideo" autoplay playsinline></video>
+                <canvas id="snapshotCanvas" style="display: none;"></canvas>
+            </div>
+            <p id="camGuidance" style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;">Hold steady with direct lighting.</p>
+            <div style="display: flex; justify-content: center; gap: 10px;">
+                <button type="button" id="snapBtn" class="btn btn-add" onclick="captureLiveSnapshot()">📸 Capture</button>
+                <button type="button" id="retakeBtn" class="btn" style="background: #f59e0b; color: white; display: none;" onclick="retakeLiveSnapshot()">🔄 Retake</button>
+                <button type="button" id="usePhotoBtn" class="btn" style="background: #10b981; color: white; display: none;" onclick="useCapturedPhoto()">✅ Save Photo</button>
+                <button type="button" class="btn" style="background: #334155; color: white;" onclick="closeLiveCameraModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Employee Directory Modal with Delete Option -->
     <div id="empListModal" class="modal">
-        <div class="modal-content" style="width: 480px;">
+        <div class="modal-content">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
                 <h3 style="color: #c084fc;">👥 Registered Employees</h3>
                 <button class="btn btn-add" style="padding: 4px 10px;" onclick="closeEmployeeListModal(); openRegisterModal();">+ Add New</button>
@@ -400,7 +532,7 @@
         </div>
     </div>
 
-    <!-- Row Detail Touch View Modal -->
+    <!-- Detail Drawer Modal -->
     <div id="detailModal" class="modal">
         <div class="modal-content detail-card">
             <h3 style="color: #38bdf8; margin-bottom: 12px;">Attendance Details</h3>

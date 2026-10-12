@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import threading
 import requests
@@ -7,28 +8,31 @@ import numpy as np
 import torch
 from facenet_pytorch import MTCNN
 
-# RTSP TCP Low Latency Configuration
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;1024000|max_delay;500000"
+# Force X11 backend and system fonts
+os.environ["QT_QPA_PLATFORM"] = "xcb"
+os.environ["FONTCONFIG_PATH"] = "/etc/fonts"
 
 BACKEND_URL = "http://127.0.0.1:8000/api/attendance/process"
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-CAM_LOGIN_SRC = "rtsp://nidhin:Nidhin123@192.168.2.179:554"
-CAM_LOGOUT_SRC = "rtsp://nidhin:Nidhin123@192.168.2.178:554"
+LOCAL_CAM_INDEX = 0
 
 mtcnn = MTCNN(
     keep_all=True,
-    min_face_size=50,
+    min_face_size=75,
     thresholds=[0.6, 0.7, 0.7],
     factor=0.709,
     device=DEVICE
 )
 
-class RTSPStreamThread:
-    def __init__(self, src):
+class LocalWebcamThread:
+    def __init__(self, src=0):
         self.src = src
-        self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
+        self.cap = cv2.VideoCapture(self.src)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         self.frame = None
         self.ret = False
         self.stopped = False
@@ -40,8 +44,8 @@ class RTSPStreamThread:
     def update(self):
         while not self.stopped:
             if not self.cap.isOpened():
-                time.sleep(1)
-                self.cap.open(self.src, cv2.CAP_FFMPEG)
+                time.sleep(0.5)
+                self.cap.open(self.src)
                 continue
 
             grabbed, frame = self.cap.read()
@@ -64,17 +68,25 @@ class RTSPStreamThread:
         if self.cap.isOpened():
             self.cap.release()
 
+def is_frame_sharp(crop: np.ndarray, min_variance: float = 40.0) -> bool:
+    """Laplacian blur gate: Ignores motion-blurred frames"""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    return var >= min_variance
+
 def extract_ultra_hd_face(clean_frame, box, target_size=(360, 360)):
-    """Clear and sharp face extraction without overlays"""
     h_img, w_img, _ = clean_frame.shape
     x1, y1, x2, y2 = [int(b) for b in box]
 
     w = x2 - x1
     h = y2 - y1
 
-    # 30% contextual padding for forehead & jawline
-    pad_w = int(w * 0.30)
-    pad_h = int(h * 0.30)
+    # Quality Gate 1: Face must be at least 75x75 pixels (no distant blurred faces)
+    if w < 75 or h < 75:
+        return None
+
+    pad_w = int(w * 0.28)
+    pad_h = int(h * 0.28)
 
     nx1 = max(0, x1 - pad_w)
     ny1 = max(0, y1 - pad_h)
@@ -82,24 +94,27 @@ def extract_ultra_hd_face(clean_frame, box, target_size=(360, 360)):
     ny2 = min(h_img, y2 + pad_h)
 
     crop = clean_frame[ny1:ny2, nx1:nx2]
-    if crop.size == 0 or crop.shape[0] < 20 or crop.shape[1] < 20:
+    if crop.size == 0 or crop.shape[0] < 30 or crop.shape[1] < 30:
         return None
 
-    # High-quality Lanczos interpolation
+    # Quality Gate 2: Sharpness check
+    if not is_frame_sharp(crop, min_variance=35.0):
+        return None
+
+    # High quality Lanczos interpolation
     hd_crop = cv2.resize(crop, target_size, interpolation=cv2.INTER_LANCZOS4)
 
-    # Adaptive Contrast Normalization (CLAHE)
+    # Adaptive Histogram Equalization
     lab = cv2.cvtColor(hd_crop, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
     cl = clahe.apply(l)
-    limg = cv2.merge((cl, a, b))
-    enhanced_crop = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    enhanced = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
 
-    # Unsharp Mask Sharpening
-    gaussian = cv2.GaussianBlur(enhanced_crop, (0, 0), 2.0)
-    unsharp = cv2.addWeighted(enhanced_crop, 1.5, gaussian, -0.5, 0)
-    return unsharp
+    # Edge Sharpening
+    gaussian = cv2.GaussianBlur(enhanced, (0, 0), 1.8)
+    crisp_face = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+    return crisp_face
 
 def send_frame_to_backend(cropped_face, camera_type: str):
     def _worker():
@@ -111,83 +126,86 @@ def send_frame_to_backend(cropped_face, camera_type: str):
             files = {'file': ('face.jpg', encoded_img.tobytes(), 'image/jpeg')}
             data = {'camera_type': camera_type}
             
-            response = requests.post(BACKEND_URL, files=files, data=data, timeout=3)
+            response = requests.post(BACKEND_URL, files=files, data=data, timeout=4)
             if response.status_code == 200:
                 res = response.json()
-                print(f"[{camera_type}] Status: {res.get('status')} | User: {res.get('user_id')} | Score: {res.get('similarity_score')}")
+                status = res.get('status')
+                user_id = res.get('user_id', 'None')
+                score = res.get('similarity_score', 'None')
+                print(f"[{camera_type}] Status: {status} | User: {user_id} | Score: {score}")
+            else:
+                print(f"[{camera_type} HTTP {response.status_code}] -> {response.text}")
         except Exception as e:
             print(f"[{camera_type} Network Error] -> {e}")
 
     threading.Thread(target=_worker, daemon=True).start()
 
-def run_streams():
-    print("[*] Starting Ultra HD Threaded RTSP Streams...")
-    stream_login = RTSPStreamThread(CAM_LOGIN_SRC)
-    stream_logout = RTSPStreamThread(CAM_LOGOUT_SRC)
+def run_local_stream():
+    print("[*] Starting Local Laptop Webcam Stream (Testing Mode)...")
+    print("[*] CONTROLS:")
+    print("    - Press 't' to TOGGLE between LOGIN and LOGOUT gate mode.")
+    print("    - Press 'q' to QUIT stream.")
 
-    last_login_time = 0.0
-    last_logout_time = 0.0
-    COOLDOWN = 2.0
-
-    print("[*] Streams operational. Press 'q' to quit.")
+    webcam = LocalWebcamThread(LOCAL_CAM_INDEX)
+    last_process_time = 0.0
+    COOLDOWN = 1.8
+    current_mode = "LOGIN"
 
     while True:
-        ret_in, frame_in = stream_login.read()
-        ret_out, frame_out = stream_logout.read()
+        ret, frame = webcam.read()
         current_time = time.time()
 
-        # Gate 1: Login Camera
-        if ret_in and frame_in is not None:
-            raw_clean_in = frame_in.copy()
-            rgb_in = cv2.cvtColor(frame_in, cv2.COLOR_BGR2RGB)
-            boxes_in, _ = mtcnn.detect(rgb_in)
+        if ret and frame is not None:
+            raw_clean = frame.copy()
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            boxes, _ = mtcnn.detect(rgb)
 
-            if boxes_in is not None:
-                for box in boxes_in:
-                    if current_time - last_login_time > COOLDOWN:
-                        hd_face = extract_ultra_hd_face(raw_clean_in, box)
+            mode_color = (0, 255, 0) if current_mode == "LOGIN" else (0, 0, 255)
+
+            if boxes is not None:
+                for box in boxes:
+                    if current_time - last_process_time > COOLDOWN:
+                        hd_face = extract_ultra_hd_face(raw_clean, box)
                         if hd_face is not None:
-                            send_frame_to_backend(hd_face, "LOGIN")
-                            last_login_time = current_time
+                            send_frame_to_backend(hd_face, current_mode)
+                            last_process_time = current_time
 
                     x1, y1, x2, y2 = [int(b) for b in box]
-                    cv2.rectangle(frame_in, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame_in, "Login Cam", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), mode_color, 2)
+                    cv2.putText(
+                        frame,
+                        f"{current_mode} Mode",
+                        (x1, max(20, y1 - 10)),
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        0.6,
+                        mode_color,
+                        1
+                    )
 
-            display_in = cv2.resize(frame_in, (640, 360))
-            cv2.imshow("Gate In - RTSP (192.168.2.179)", display_in)
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], 40), (15, 23, 42), -1)
+            cv2.putText(
+                frame,
+                f"Active Mode: [{current_mode}] | Press 't' to toggle Gate | 'q' to quit",
+                (15, 26),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                mode_color,
+                2
+            )
+
+            cv2.imshow("System Camera - AI Face Attendance", frame)
         else:
             time.sleep(0.02)
 
-        # Gate 2: Logout Camera
-        if ret_out and frame_out is not None:
-            raw_clean_out = frame_out.copy()
-            rgb_out = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)
-            boxes_out, _ = mtcnn.detect(rgb_out)
-
-            if boxes_out is not None:
-                for box in boxes_out:
-                    if current_time - last_logout_time > COOLDOWN:
-                        hd_face = extract_ultra_hd_face(raw_clean_out, box)
-                        if hd_face is not None:
-                            send_frame_to_backend(hd_face, "LOGOUT")
-                            last_logout_time = current_time
-
-                    x1, y1, x2, y2 = [int(b) for b in box]
-                    cv2.rectangle(frame_out, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                    cv2.putText(frame_out, "Logout Cam", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-            display_out = cv2.resize(frame_out, (640, 360))
-            cv2.imshow("Gate Out - RTSP (192.168.2.178)", display_out)
-        else:
-            time.sleep(0.02)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord('t'):
+            current_mode = "LOGOUT" if current_mode == "LOGIN" else "LOGIN"
+            print(f"[*] Switched Gate Mode to: {current_mode}")
 
-    stream_login.stop()
-    stream_logout.stop()
+    webcam.stop()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    run_streams()
+    run_local_stream()

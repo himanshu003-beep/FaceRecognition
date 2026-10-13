@@ -60,13 +60,17 @@
             background: rgba(239, 68, 68, 0.2);
             color: #ef4444;
             border: 1px solid rgba(239, 68, 68, 0.4);
-            padding: 5px 10px;
-            font-size: 11px;
+            padding: 6px 12px;
+            font-size: 12px;
             border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
         }
-        .btn-delete:hover {
+        .btn-delete:hover, .btn-delete:focus {
             background: #ef4444;
             color: white;
+            outline: none;
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
         }
 
         .live-dot {
@@ -83,26 +87,67 @@
             box-shadow: 0 0 14px #22c55e;
         }
 
-        .filter-bar {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 18px;
+        /* Hover Navigation Dropdown Menu */
+        .nav-dropdown-wrapper {
+            position: relative;
+            display: inline-block;
+            margin-bottom: 20px;
         }
-        .filter-btn {
-            background: #1e293b;
-            color: #94a3b8;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            padding: 6px 14px;
-            border-radius: 6px;
+        .nav-dropdown-trigger {
+            background: rgba(30, 41, 59, 0.85);
+            border: 1px solid #38bdf8;
+            color: #38bdf8;
+            padding: 9px 18px;
+            border-radius: 8px;
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            backdrop-filter: blur(8px);
+            transition: all 0.2s ease;
         }
-        .filter-btn.active {
+        .nav-dropdown-trigger:hover {
             background: #38bdf8;
             color: #0f172a;
-            border-color: #38bdf8;
+        }
+        .nav-dropdown-menu {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: #0f172a;
+            border: 1px solid rgba(56, 189, 248, 0.4);
+            border-radius: 8px;
+            padding: 6px 0;
+            min-width: 220px;
+            box-shadow: 0 14px 28px rgba(0, 0, 0, 0.7);
+            z-index: 500;
+            backdrop-filter: blur(12px);
+        }
+        .nav-dropdown-wrapper:hover .nav-dropdown-menu {
+            display: block;
+        }
+        .nav-dropdown-item {
+            padding: 10px 16px;
+            font-size: 13px;
+            color: #94a3b8;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+        }
+        .nav-dropdown-item:hover {
+            background: rgba(56, 189, 248, 0.15);
+            color: #38bdf8;
+            padding-left: 20px;
+        }
+        .nav-dropdown-item.active {
+            color: #38bdf8;
+            font-weight: 700;
+            background: rgba(56, 189, 248, 0.1);
         }
 
         .cards-grid {
@@ -316,41 +361,32 @@
             border: 2px solid #38bdf8;
         }
 
-        .photo-action-menu {
-            position: relative;
-            display: inline-block;
+        /* Two Separate Photo Action Buttons */
+        .separate-photo-controls {
+            display: flex;
+            gap: 10px;
             margin-bottom: 12px;
         }
-        .photo-dropdown {
-            display: none;
-            position: absolute;
-            top: 105%;
-            left: 0;
-            background: #0f172a;
-            border: 1px solid #38bdf8;
-            border-radius: 8px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-            z-index: 100;
-            width: 220px;
-        }
-        .photo-dropdown.show { display: block; }
-        .photo-dropdown button {
-            width: 100%;
-            padding: 10px 14px;
-            text-align: left;
-            background: none;
-            border: none;
-            color: #f8fafc;
-            font-size: 13px;
+        .btn-photo-opt {
+            flex: 1;
+            padding: 9px 12px;
+            font-size: 12px;
+            border-radius: 6px;
+            font-weight: 600;
             cursor: pointer;
+            border: 1px solid #38bdf8;
+            background: #0f172a;
+            color: #38bdf8;
             display: flex;
             align-items: center;
-            gap: 8px;
+            justify-content: center;
+            gap: 6px;
+            transition: all 0.2s ease;
         }
-        .photo-dropdown button:hover {
+        .btn-photo-opt:hover {
             background: rgba(56, 189, 248, 0.15);
-            color: #38bdf8;
         }
+
         .selected-photos-preview {
             display: flex;
             flex-wrap: wrap;
@@ -412,17 +448,22 @@
             <h1>Office Attendance</h1>
         </div>
         <div class="header-actions">
-            <button class="btn btn-add" onclick="openRegisterModal()">➕ Register</button>
-            <button class="btn btn-list" onclick="openEmployeeListModal()">👥 Employee List</button>
+            <button class="btn btn-add" onclick="openRegisterModal()"> Register</button>
+            <button class="btn btn-list" onclick="openEmployeeListModal()"> Employee List</button>
             <div id="liveDot" class="live-dot" title="Server Status"></div>
         </div>
     </div>
 
-    <!-- Filter Toggle -->
-    <div class="filter-bar">
-        <button class="filter-btn active" id="filterAll" onclick="setFilter('ALL')">All</button>
-        <button class="filter-btn" id="filterEmp" onclick="setFilter('EMPLOYEES')">Employees</button>
-        <button class="filter-btn" id="filterUnknown" onclick="setFilter('UNKNOWN')">Unknown</button>
+    <!-- Requirement 6: Hover Navigation Dropdown Menu -->
+    <div class="nav-dropdown-wrapper">
+        <div class="nav-dropdown-trigger" id="currentViewLabel">
+             View Records: All ▾
+        </div>
+        <div class="nav-dropdown-menu">
+            <div class="nav-dropdown-item active" id="filterAll" onclick="setFilter('ALL')"> All Attendance Logs</div>
+            <div class="nav-dropdown-item" id="filterEmp" onclick="setFilter('EMPLOYEES')"> Verified Employees</div>
+            <div class="nav-dropdown-item" id="filterUnknown" onclick="setFilter('UNKNOWN')"> Unknown Visitors</div>
+        </div>
     </div>
 
     <div class="cards-grid">
@@ -463,31 +504,30 @@
         </table>
     </div>
 
-    <!-- Register Modal -->
+    <!-- Requirement 5: Register Modal with Two Distinct Photo Buttons -->
     <div id="registerModal" class="modal">
         <div class="modal-content">
             <h3 style="color: #38bdf8; margin-bottom: 14px;">Register New Employee</h3>
             <div style="font-size: 11px; color: #94a3b8; margin-bottom: 12px; background: rgba(56, 189, 248, 0.08); padding: 8px; border-radius: 6px;">
-                💡 <strong>Important:</strong> Photo is strictly required. Ensure direct lighting on the face without blur.
+                 <strong>Photo Required:</strong> Please provide a clear frontal photo using either option below.
             </div>
             <form id="registerForm" onsubmit="handleRegister(event)">
                 <input type="text" id="regEmpId" placeholder="Employee ID (e.g. EMP_001)" required>
                 <input type="text" id="regName" placeholder="Full Name (e.g. Himanshu Shukla)" required>
                 
-                <div class="photo-action-menu">
-                    <button type="button" class="btn" style="background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8;" onclick="togglePhotoMenu()">
-                        ➕ Add Photo(s) *
+                <div class="separate-photo-controls">
+                    <button type="button" class="btn-photo-opt" onclick="triggerFileInput()">
+                        Upload Image
                     </button>
-                    <div id="photoDropdown" class="photo-dropdown">
-                        <button type="button" onclick="triggerFileInput()">📁 Upload from System</button>
-                        <button type="button" onclick="openLiveCameraModal()">📸 Capture Live Photo</button>
-                    </div>
+                    <button type="button" class="btn-photo-opt" onclick="openLiveCameraModal()">
+                        Capture Using Camera
+                    </button>
                 </div>
                 <input type="file" id="regPhotos" accept="image/*" multiple style="display: none;" onchange="handleSystemFilePicked(event)">
 
-                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Face Photos:</div>
+                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Selected Photos:</div>
                 <div id="selectedPhotosContainer" class="selected-photos-preview">
-                    <span style="font-size: 11px; color: #64748b; margin: auto;">No photos added yet (Mandatory)</span>
+                    <span style="font-size: 11px; color: #64748b; margin: auto;">No photos added yet</span>
                 </div>
 
                 <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;">
@@ -498,7 +538,7 @@
         </div>
     </div>
 
-    <!-- Live Camera Modal -->
+    <!-- Live Camera Capture Modal -->
     <div id="liveCameraModal" class="modal">
         <div class="modal-content" style="width: 400px; text-align: center;">
             <h3 style="color: #38bdf8; margin-bottom: 12px;">Live Face Capture</h3>
@@ -506,7 +546,7 @@
                 <video id="webcamVideo" autoplay playsinline></video>
                 <canvas id="snapshotCanvas" style="display: none;"></canvas>
             </div>
-            <p id="camGuidance" style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;">Hold steady with direct lighting.</p>
+            <p id="camGuidance" style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;">Look directly into camera and hold steady.</p>
             <div style="display: flex; justify-content: center; gap: 10px;">
                 <button type="button" id="snapBtn" class="btn btn-add" onclick="captureLiveSnapshot()">📸 Capture</button>
                 <button type="button" id="retakeBtn" class="btn" style="background: #f59e0b; color: white; display: none;" onclick="retakeLiveSnapshot()">🔄 Retake</button>
@@ -516,11 +556,11 @@
         </div>
     </div>
 
-    <!-- Employee Directory Modal with Delete Option -->
+    <!-- Employee Directory Modal with Accessible Delete Controls -->
     <div id="empListModal" class="modal">
         <div class="modal-content">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                <h3 style="color: #c084fc;">👥 Registered Employees</h3>
+                <h3 style="color: #c084fc;"> Registered Employees</h3>
                 <button class="btn btn-add" style="padding: 4px 10px;" onclick="closeEmployeeListModal(); openRegisterModal();">+ Add New</button>
             </div>
             <div id="empListContainer">

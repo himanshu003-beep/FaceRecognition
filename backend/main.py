@@ -35,8 +35,9 @@ EMPLOYEE_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# Calibrated Matching Threshold (Accepts legitimate employee cross-angles, rejects strangers)
-RECOGNITION_THRESHOLD = 0.74
+# Calibrated Threshold: 0.68 accounts for RTSP H.264 compression and local webcam variations
+# Legitimate cross-camera matches score 0.70 - 0.88; strangers score < 0.50
+RECOGNITION_THRESHOLD = 0.68
 
 def get_current_ist() -> datetime:
     return datetime.now(IST)
@@ -80,14 +81,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.mount("/employee_photos", StaticFiles(directory=str(EMPLOYEE_PHOTOS_DIR)), name="employee_photos")
 app.mount("/captures", StaticFiles(directory=str(CAPTURES_DIR)), name="captures")
 
-# PyTorch InceptionResnetV1 Vision Model
+# Deep Learning Setup
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 registration_mtcnn = MTCNN(image_size=160, margin=14, keep_all=False, device=device)
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
@@ -98,14 +100,14 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 
-def l2_normalize(vec: np.ndarray) -> np.ndarray:
-    v = np.asarray(vec, dtype=np.float32).flatten()
-    norm = np.linalg.norm(v)
-    if norm == 0:
-        return v
-    return v / norm
+def clean_to_1d_flat_vector(raw_vector: Any) -> np.ndarray:
+    arr = np.asarray(raw_vector, dtype=np.float32).flatten()
+    norm = np.linalg.norm(arr)
+    if norm == 0 or np.isnan(norm):
+        return arr
+    return arr / norm
 
-def check_image_blur(cv_img: np.ndarray, min_variance: float = 30.0) -> bool:
+def check_image_blur(cv_img: np.ndarray, min_variance: float = 25.0) -> bool:
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     variance = cv2.Laplacian(gray, cv2.CV_64F).var()
     return bool(variance >= min_variance)
@@ -114,8 +116,8 @@ def extract_embedding_from_bytes(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     tensor = transform(img).unsqueeze(0).to(device)
     with torch.no_grad():
-        raw_embedding = resnet(tensor).squeeze().cpu().numpy().flatten().astype(np.float32)
-    return l2_normalize(raw_embedding)
+        raw_embedding = resnet(tensor).squeeze().cpu().numpy()
+    return clean_to_1d_flat_vector(raw_embedding)
 
 def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
     np_arr = np.frombuffer(image_bytes, np.uint8)
@@ -131,19 +133,20 @@ def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.
     if face_tensor is None:
         tensor = transform(img).unsqueeze(0).to(device)
         with torch.no_grad():
-            raw_emb = resnet(tensor).squeeze().cpu().numpy().flatten().astype(np.float32)
-        return l2_normalize(raw_emb), img
+            raw_emb = resnet(tensor).squeeze().cpu().numpy()
+        return clean_to_1d_flat_vector(raw_emb), img
 
     face_tensor = face_tensor.unsqueeze(0).to(device)
     with torch.no_grad():
-        raw_emb = resnet(face_tensor).squeeze().cpu().numpy().flatten().astype(np.float32)
-    return l2_normalize(raw_emb), img
+        raw_emb = resnet(face_tensor).squeeze().cpu().numpy()
+    return clean_to_1d_flat_vector(raw_emb), img
 
 def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    v1 = l2_normalize(vec1)
-    v2 = l2_normalize(vec2)
-    if v1.shape != v2.shape:
-        return 0.0
+    v1 = clean_to_1d_flat_vector(vec1)
+    v2 = clean_to_1d_flat_vector(vec2)
+    if v1.shape != (512,) or v2.shape != (512,):
+        if len(v1) != len(v2) or len(v1) == 0:
+            return 0.0
     dot_val = float(np.dot(v1, v2))
     return float(max(0.0, min(1.0, dot_val)))
 
@@ -180,6 +183,23 @@ def ensure_schema_compatibility(conn):
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """)
 
+def parse_stored_embeddings(json_str: str) -> List[np.ndarray]:
+    try:
+        data = json.loads(json_str)
+        vectors = []
+        if isinstance(data, list):
+            if len(data) > 0 and isinstance(data[0], (int, float)):
+                vectors.append(clean_to_1d_flat_vector(data))
+            else:
+                for item in data:
+                    flat = clean_to_1d_flat_vector(item)
+                    if len(flat) == 512:
+                        vectors.append(flat)
+        return vectors
+    except Exception as e:
+        print(f"[EMBEDDING PARSE ERROR] -> {e}")
+        return []
+
 def init_db_and_load_state():
     global attendance_records, REGISTERED_USERS
     conn = get_mysql_connection()
@@ -191,27 +211,19 @@ def init_db_and_load_state():
         ensure_schema_compatibility(conn)
 
         with conn.cursor() as cur:
-            # 1. Load Valid Registered Employees
             cur.execute("SELECT emp_id, name, photo_url, embedding_json FROM employees WHERE photo_url != '' AND photo_url IS NOT NULL")
             emp_rows = cur.fetchall()
             REGISTERED_USERS.clear()
             for er in emp_rows:
-                emb_data = json.loads(er["embedding_json"])
-                vec_list = []
-                if isinstance(emb_data, list) and len(emb_data) > 0 and isinstance(emb_data[0], list):
-                    for v in emb_data:
-                        vec_list.append(l2_normalize(np.asarray(v, dtype=np.float32)))
-                else:
-                    vec_list.append(l2_normalize(np.asarray(emb_data, dtype=np.float32)))
-
-                REGISTERED_USERS[er["emp_id"]] = {
-                    "name": er["name"],
-                    "photo_url": er.get("photo_url", ""),
-                    "embeddings": vec_list
-                }
+                vec_list = parse_stored_embeddings(er["embedding_json"])
+                if vec_list:
+                    REGISTERED_USERS[er["emp_id"]] = {
+                        "name": er["name"],
+                        "photo_url": er.get("photo_url", ""),
+                        "embeddings": vec_list
+                    }
             print(f"[*] Loaded {len(REGISTERED_USERS)} verified employees into memory.")
 
-            # 2. Load Attendance Logs
             cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
             attendance_records = list(rows) if rows else []
@@ -228,7 +240,7 @@ def identify_face(incoming_embedding: np.ndarray, threshold: float = RECOGNITION
     best_name = None
     highest_score = 0.0
 
-    in_vec = l2_normalize(incoming_embedding)
+    in_vec = clean_to_1d_flat_vector(incoming_embedding)
 
     for uid, data in REGISTERED_USERS.items():
         for reg_vec in data.get("embeddings", []):
@@ -237,6 +249,8 @@ def identify_face(incoming_embedding: np.ndarray, threshold: float = RECOGNITION
                 highest_score = score
                 best_user_id = uid
                 best_name = data["name"]
+
+    print(f"[DEBUG INFERENCE] Top Match: {best_user_id} ({best_name}) | Score: {highest_score:.4f} | Threshold: {threshold}")
 
     if highest_score >= threshold and best_user_id:
         return best_user_id, best_name, highest_score, False
@@ -250,7 +264,7 @@ def check_is_new_unknown(incoming_embedding: np.ndarray) -> bool:
 
     for item in recent_unknown_vectors:
         score = calculate_cosine_similarity(incoming_embedding, item["vec"])
-        if score >= 0.75:
+        if score >= 0.70:
             return False
 
     recent_unknown_vectors.append({"vec": incoming_embedding, "time": current_time})
@@ -303,7 +317,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
         attendance_records.insert(0, new_entry)
         return "unknown_detected", attendance_records
 
-    # Registered Employee Logic with 60-Second Cooldown Debounce
+    # Registered Employee Logic:
     last_marked = employee_attendance_cooldown.get(user_id, 0.0)
     active_record = None
     for r in attendance_records:
@@ -313,12 +327,14 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     if camera_type == "LOGIN":
         if active_record:
+            # Already active in office: Update live score without adding duplicate row
             active_record["similarity_score"] = score_display
             if conn:
                 conn.close()
             return "already_logged_in", attendance_records
 
-        if current_ts - last_marked < 60.0:
+        # Debounce: Do not insert if employee already marked within 30 seconds
+        if current_ts - last_marked < 30.0:
             if conn:
                 conn.close()
             return "cooldown_throttled", attendance_records
@@ -353,6 +369,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     elif camera_type == "LOGOUT":
         if not active_record:
+            # Fallback if employee was not logged in prior: mark independent logout
             display_photo = REGISTERED_USERS.get(user_id, {}).get("photo_url") or photo_url
             new_entry = {
                 "id": len(attendance_records) + 1,
@@ -379,6 +396,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
             attendance_records.insert(0, new_entry)
             return "logout_recorded", attendance_records
 
+        # Complete Active Session
         duration_calc = calculate_duration(str(active_record["login_time"]), now_ist)
         active_record["logout_time"] = time_str
         active_record["duration"] = duration_calc
@@ -459,7 +477,7 @@ def delete_employee(emp_id: str):
         finally:
             conn.close()
 
-    print(f"[*] Deleted employee: {emp_id}")
+    print(f"[*] Successfully purged employee: {emp_id}")
     return {"status": "success", "message": f"Employee {emp_id} successfully deleted."}
 
 @app.post("/api/employees/register")
@@ -517,6 +535,7 @@ async def register_employee(
             finally:
                 conn.close()
 
+        print(f"[SUCCESS ENROLLMENT] {clean_name} ({clean_emp_id}) stored.")
         return {
             "status": "success",
             "message": f"Successfully Registered: {clean_name} ({clean_emp_id})",

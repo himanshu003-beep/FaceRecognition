@@ -8,7 +8,6 @@ import numpy as np
 import torch
 from facenet_pytorch import MTCNN
 
-# Configure Display Backend & Fontconfig
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["FONTCONFIG_PATH"] = "/etc/fonts"
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;1024000|max_delay;500000"
@@ -16,7 +15,6 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;10
 BACKEND_URL = "http://127.0.0.1:8000/api/attendance/process"
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# HYBRID CAMERA CONFIGURATION:
 # Gate 1 (LOGIN) = Local Laptop Webcam
 CAM_LOGIN_SRC = 0
 
@@ -81,7 +79,7 @@ class ThreadedCamera:
         if self.cap.isOpened():
             self.cap.release()
 
-def is_frame_sharp(crop: np.ndarray, min_variance: float = 38.0) -> bool:
+def is_frame_sharp(crop: np.ndarray, min_variance: float = 30.0) -> bool:
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     return cv2.Laplacian(gray, cv2.CV_64F).var() >= min_variance
 
@@ -107,19 +105,19 @@ def extract_ultra_hd_face(clean_frame, box, target_size=(360, 360)):
     if crop.size == 0 or crop.shape[0] < 30 or crop.shape[1] < 30:
         return None
 
-    if not is_frame_sharp(crop, min_variance=35.0):
+    if not is_frame_sharp(crop, min_variance=25.0):
         return None
 
     hd_crop = cv2.resize(crop, target_size, interpolation=cv2.INTER_LANCZOS4)
 
     lab = cv2.cvtColor(hd_crop, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     cl = clahe.apply(l)
     enhanced = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
 
-    gaussian = cv2.GaussianBlur(enhanced, (0, 0), 1.8)
-    crisp_face = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+    gaussian = cv2.GaussianBlur(enhanced, (0, 0), 1.5)
+    crisp_face = cv2.addWeighted(enhanced, 1.4, gaussian, -0.4, 0)
     return crisp_face
 
 def send_frame_to_backend(cropped_face, camera_type: str):
@@ -164,7 +162,7 @@ def run_hybrid_streams():
         ret_out, frame_out = stream_logout.read()
         current_time = time.time()
 
-        # 1. GATE IN: System Laptop Webcam (LOGIN)
+        # Gate 1: Laptop Cam (LOGIN)
         if ret_in and frame_in is not None:
             raw_clean_in = frame_in.copy()
             rgb_in = cv2.cvtColor(frame_in, cv2.COLOR_BGR2RGB)
@@ -187,7 +185,7 @@ def run_hybrid_streams():
         else:
             time.sleep(0.01)
 
-        # 2. GATE OUT: Office RTSP Camera (LOGOUT)
+        # Gate 2: Office RTSP Cam (LOGOUT)
         if ret_out and frame_out is not None:
             raw_clean_out = frame_out.copy()
             rgb_out = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)

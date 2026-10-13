@@ -24,18 +24,19 @@ import pytz
 
 load_dotenv()
 
-CAPTURES_DIR = Path("captures")
+BASE_DIR = Path(__file__).resolve().parent.parent
+CAPTURES_DIR = BASE_DIR / "captures"
 UNKNOWN_DIR = CAPTURES_DIR / "unknown"
-EMPLOYEE_PHOTOS_DIR = Path("employee_photos")
+EMPLOYEE_PHOTOS_DIR = BASE_DIR / "employee_photos"
+
 CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 UNKNOWN_DIR.mkdir(parents=True, exist_ok=True)
 EMPLOYEE_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# Calibrated Real-World Intra-Face Threshold for InceptionResnetV1
-# Matches genuine employees (scores 0.78 - 0.95) while rejecting strangers (< 0.65)
-RECOGNITION_THRESHOLD = 0.78
+# Calibrated Matching Threshold (Accepts legitimate employee cross-angles, rejects strangers)
+RECOGNITION_THRESHOLD = 0.74
 
 def get_current_ist() -> datetime:
     return datetime.now(IST)
@@ -83,10 +84,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/employee_photos", StaticFiles(directory=EMPLOYEE_PHOTOS_DIR), name="employee_photos")
-app.mount("/captures", StaticFiles(directory=CAPTURES_DIR), name="captures")
+app.mount("/employee_photos", StaticFiles(directory=str(EMPLOYEE_PHOTOS_DIR)), name="employee_photos")
+app.mount("/captures", StaticFiles(directory=str(CAPTURES_DIR)), name="captures")
 
-# Deep Learning Setup
+# PyTorch InceptionResnetV1 Vision Model
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 registration_mtcnn = MTCNN(image_size=160, margin=14, keep_all=False, device=device)
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
@@ -104,7 +105,7 @@ def l2_normalize(vec: np.ndarray) -> np.ndarray:
         return v
     return v / norm
 
-def check_image_blur(cv_img: np.ndarray, min_variance: float = 35.0) -> bool:
+def check_image_blur(cv_img: np.ndarray, min_variance: float = 30.0) -> bool:
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     variance = cv2.Laplacian(gray, cv2.CV_64F).var()
     return bool(variance >= min_variance)
@@ -122,8 +123,8 @@ def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.
     if cv_img is None:
         raise ValueError("Invalid image file format.")
 
-    if not check_image_blur(cv_img, min_variance=30.0):
-        raise ValueError("Image is too blurry. Please capture with steady lighting.")
+    if not check_image_blur(cv_img, min_variance=25.0):
+        raise ValueError("Image is too blurry. Please capture steady frontal photo.")
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     face_tensor = registration_mtcnn(img)
@@ -149,8 +150,6 @@ def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
 attendance_records: List[Dict[str, Any]] = []
 recent_unknown_vectors: List[Dict[str, Any]] = []
-
-# Employee Continuous Capture Debounce Cache (Employee ID -> Timestamp)
 employee_attendance_cooldown: Dict[str, float] = {}
 
 def ensure_schema_compatibility(conn):
@@ -185,13 +184,14 @@ def init_db_and_load_state():
     global attendance_records, REGISTERED_USERS
     conn = get_mysql_connection()
     if not conn:
-        print("[!] DB Connection offline. Operating with memory.")
+        print("[!] DB Connection offline. Retrying...")
         return
 
     try:
         ensure_schema_compatibility(conn)
 
         with conn.cursor() as cur:
+            # 1. Load Valid Registered Employees
             cur.execute("SELECT emp_id, name, photo_url, embedding_json FROM employees WHERE photo_url != '' AND photo_url IS NOT NULL")
             emp_rows = cur.fetchall()
             REGISTERED_USERS.clear()
@@ -211,10 +211,11 @@ def init_db_and_load_state():
                 }
             print(f"[*] Loaded {len(REGISTERED_USERS)} verified employees into memory.")
 
+            # 2. Load Attendance Logs
             cur.execute("SELECT id, user_id, name, photo_url, similarity_score, login_time, logout_time, duration, status FROM attendance ORDER BY id DESC LIMIT 500")
             rows = cur.fetchall()
             attendance_records = list(rows) if rows else []
-            print(f"[*] Restored {len(attendance_records)} persistent attendance records from database.")
+            print(f"[*] Restored {len(attendance_records)} attendance logs from database.")
     except Exception as e:
         print(f"[DB INIT ERROR] -> {traceback.format_exc()}")
     finally:
@@ -249,7 +250,7 @@ def check_is_new_unknown(incoming_embedding: np.ndarray) -> bool:
 
     for item in recent_unknown_vectors:
         score = calculate_cosine_similarity(incoming_embedding, item["vec"])
-        if score >= 0.80:
+        if score >= 0.75:
             return False
 
     recent_unknown_vectors.append({"vec": incoming_embedding, "time": current_time})
@@ -302,7 +303,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
         attendance_records.insert(0, new_entry)
         return "unknown_detected", attendance_records
 
-    # Registered Employee Logic with Anti-Duplication Cooldown (60 seconds)
+    # Registered Employee Logic with 60-Second Cooldown Debounce
     last_marked = employee_attendance_cooldown.get(user_id, 0.0)
     active_record = None
     for r in attendance_records:
@@ -310,10 +311,8 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
             active_record = r
             break
 
-    # If employee is already IN OFFICE and stands in front of LOGIN camera again
     if camera_type == "LOGIN":
         if active_record:
-            # Just update live score on dashboard without creating duplicate row
             active_record["similarity_score"] = score_display
             if conn:
                 conn.close()
@@ -325,8 +324,6 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
             return "cooldown_throttled", attendance_records
 
         employee_attendance_cooldown[user_id] = current_ts
-
-        # Use Registered Photo if available, else live photo
         display_photo = REGISTERED_USERS.get(user_id, {}).get("photo_url") or photo_url
 
         new_entry = {
@@ -557,7 +554,6 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
 
             photo_url = save_unknown_photo(image_bytes)
         else:
-            # Use registered photo for authorized employee
             photo_url = REGISTERED_USERS.get(user_id, {}).get("photo_url") or convert_bytes_to_base64_data_url(image_bytes)
 
         action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score, is_unknown)

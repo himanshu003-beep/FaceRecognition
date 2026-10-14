@@ -5,592 +5,347 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Office Attendance Portal</title>
     <style>
+        :root {
+            --bg-base: #0b0f19;
+            --bg-card: #121826;
+            --border-color: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-amber: #f59e0b;
+            --accent-purple: #8b5cf6;
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         }
+
         body {
-            background: linear-gradient(135deg, #0a0f1d 0%, #0f172a 50%, #111e38 100%);
-            color: #f8fafc;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            padding: 24px 32px;
             min-height: 100vh;
-            padding: 24px;
         }
-        .header {
+
+        /* Top Navigation Header */
+        header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding-bottom: 20px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
             margin-bottom: 24px;
         }
-        .logo-area h1 {
-            font-size: 26px;
-            font-weight: 700;
-            background: linear-gradient(90deg, #38bdf8, #818cf8, #c084fc);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .header-actions {
+
+        .logo-section {
             display: flex;
             align-items: center;
             gap: 12px;
         }
 
-        .btn {
+        .logo-title {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #64748b;
+            box-shadow: 0 0 8px rgba(100, 116, 139, 0.5);
+            transition: all 0.3s ease;
+        }
+
+        .status-dot.connected {
+            background-color: var(--accent-green);
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.8);
+        }
+
+        button {
+            border: none;
             padding: 9px 16px;
             border-radius: 8px;
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
-            border: none;
-            display: flex;
-            align-items: center;
-            gap: 7px;
             transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
         }
-        .btn-add { background: #3b82f6; color: white; }
-        .btn-add:hover { background: #2563eb; transform: translateY(-1px); }
 
-        .btn-list { background: #8b5cf6; color: white; }
-        .btn-list:hover { background: #7c3aed; transform: translateY(-1px); }
+        button:hover {
+            filter: brightness(1.15);
+            transform: translateY(-1px);
+        }
 
-        .btn-delete {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
+        .btn-register {
+            background-color: var(--accent-blue);
+            color: #ffffff;
+        }
+
+        .btn-employees {
+            background-color: var(--accent-purple);
+            color: #ffffff;
+        }
+
+        .btn-clear {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #f87171;
             border: 1px solid rgba(239, 68, 68, 0.4);
-            padding: 6px 12px;
-            font-size: 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .btn-delete:hover, .btn-delete:focus {
-            background: #ef4444;
-            color: white;
-            outline: none;
-            box-shadow: 0 0 10px rgba(239, 68, 68, 0.6);
         }
 
-        .live-dot {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background-color: #ef4444;
-            box-shadow: 0 0 10px #ef4444;
-            margin-left: 6px;
-            transition: all 0.3s;
-        }
-        .live-dot.online {
-            background-color: #22c55e;
-            box-shadow: 0 0 14px #22c55e;
+        .btn-restore {
+            background-color: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.4);
         }
 
-        /* Hover Navigation Dropdown Menu */
-        .nav-dropdown-wrapper {
-            position: relative;
-            display: inline-block;
-            margin-bottom: 20px;
-        }
-        .nav-dropdown-trigger {
-            background: rgba(30, 41, 59, 0.85);
-            border: 1px solid #38bdf8;
-            color: #38bdf8;
-            padding: 9px 18px;
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            backdrop-filter: blur(8px);
-            transition: all 0.2s ease;
-        }
-        .nav-dropdown-trigger:hover {
-            background: #38bdf8;
-            color: #0f172a;
-        }
-        .nav-dropdown-menu {
-            display: none;
-            position: absolute;
-            top: 100%;
-            left: 0;
-            background: #0f172a;
-            border: 1px solid rgba(56, 189, 248, 0.4);
-            border-radius: 8px;
-            padding: 6px 0;
-            min-width: 220px;
-            box-shadow: 0 14px 28px rgba(0, 0, 0, 0.7);
-            z-index: 500;
-            backdrop-filter: blur(12px);
-        }
-        .nav-dropdown-wrapper:hover .nav-dropdown-menu {
-            display: block;
-        }
-        .nav-dropdown-item {
-            padding: 10px 16px;
-            font-size: 13px;
-            color: #94a3b8;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            transition: all 0.2s ease;
-        }
-        .nav-dropdown-item:hover {
-            background: rgba(56, 189, 248, 0.15);
-            color: #38bdf8;
-            padding-left: 20px;
-        }
-        .nav-dropdown-item.active {
-            color: #38bdf8;
-            font-weight: 700;
-            background: rgba(56, 189, 248, 0.1);
-        }
-
-        .cards-grid {
+        /* Stats Cards */
+        .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
         }
-        .card {
-            border-radius: 10px;
-            padding: 16px 20px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            background: rgba(17, 24, 39, 0.6);
-        }
-        .card h3 {
-            font-size: 12px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            margin-bottom: 6px;
-        }
-        .card p { font-size: 28px; font-weight: 700; }
 
-        .table-container {
-            background: rgba(17, 24, 39, 0.7);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 10px;
-            overflow: visible;
+        .stat-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
         }
+
+        .stat-label {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .stat-value.total { color: #60a5fa; }
+        .stat-value.in-office { color: #34d399; }
+        .stat-value.checked-out { color: #f472b6; }
+        .stat-value.unauthorized { color: #f87171; }
+
+        /* Filter Controls */
+        .toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .filter-select {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            outline: none;
+        }
+
+        /* Attendance Table */
+        .table-container {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
             text-align: left;
+            font-size: 14px;
         }
-        thead { background: rgba(15, 23, 42, 0.95); }
-        th, td {
-            padding: 14px 16px;
-            font-size: 13px;
+
+        th {
+            background-color: #172033;
+            color: var(--text-muted);
+            font-weight: 600;
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border-color);
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-main);
             vertical-align: middle;
         }
-        th { color: #94a3b8; font-weight: 600; }
-        tbody tr {
-            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-            cursor: pointer;
-            transition: background 0.15s ease;
-        }
-        tbody tr:hover {
-            background: rgba(56, 189, 248, 0.08);
+
+        tr:hover {
+            background-color: rgba(255, 255, 255, 0.02);
         }
 
-        .avatar-box {
-            position: relative;
-            display: inline-block;
-            width: 44px;
-            height: 44px;
-        }
         .avatar-img {
-            width: 44px;
-            height: 44px;
+            width: 42px;
+            height: 42px;
             border-radius: 50%;
             object-fit: cover;
-            border: 2px solid #38bdf8;
-            display: block;
-        }
-        .avatar-img.unknown-border {
-            border-color: #ef4444 !important;
-        }
-
-        .whatsapp-preview {
-            display: none;
-            position: absolute;
-            top: -50px;
-            left: 55px;
-            z-index: 1000;
-            background: #0f172a;
-            border: 2px solid #38bdf8;
-            border-radius: 16px;
-            padding: 12px;
-            box-shadow: 0 20px 35px -5px rgba(0, 0, 0, 0.95), 0 0 20px rgba(56, 189, 248, 0.4);
-            text-align: center;
-            animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-            pointer-events: none;
-        }
-        .whatsapp-preview.unknown-card {
-            border-color: #ef4444 !important;
-            box-shadow: 0 20px 35px -5px rgba(0, 0, 0, 0.95), 0 0 20px rgba(239, 68, 68, 0.5) !important;
-        }
-        .whatsapp-preview img {
-            width: 150px;
-            height: 150px;
-            border-radius: 50%;
-            object-fit: cover;
-            border: 3px solid #38bdf8;
-            margin: 0 auto 8px auto;
-        }
-        .whatsapp-preview.unknown-card img {
-            border-color: #ef4444 !important;
-        }
-        .whatsapp-preview .name-tag {
-            font-size: 14px;
-            font-weight: 700;
-            color: #f1f5f9;
-        }
-        .whatsapp-preview .id-tag {
-            font-size: 11px;
-            color: #38bdf8;
-            font-family: monospace;
-        }
-        .avatar-box:hover .whatsapp-preview {
-            display: block;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.85) translateX(-10px); }
-            to { opacity: 1; transform: scale(1) translateX(0); }
+            border: 2px solid var(--border-color);
+            background-color: #1e293b;
         }
 
         .badge {
             display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
+            padding: 4px 10px;
+            border-radius: 20px;
             font-size: 11px;
             font-weight: 700;
+            letter-spacing: 0.04em;
         }
-        .badge-in { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
-        .badge-out { background: rgba(192, 132, 252, 0.2); color: #c084fc; }
-        .badge-unknown { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+
+        .badge-success {
+            background-color: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge-checkedout {
+            background-color: rgba(148, 163, 184, 0.15);
+            color: #cbd5e1;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+        }
+
+        .badge-danger {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
 
         .score-pill {
-            background: rgba(56, 189, 248, 0.15);
-            color: #38bdf8;
             font-family: monospace;
+            background-color: #0f172a;
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid #1e293b;
+            color: #38bdf8;
             font-size: 12px;
-            padding: 3px 7px;
-            border-radius: 4px;
         }
 
+        /* Modal Styles */
         .modal {
             display: none;
             position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.78);
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.75);
             backdrop-filter: blur(4px);
-            z-index: 2000;
             justify-content: center;
             align-items: center;
+            z-index: 1000;
         }
+
         .modal-content {
-            background: #1e293b;
-            padding: 24px;
-            border-radius: 12px;
-            border: 1px solid rgba(255,255,255,0.1);
-            width: 480px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            width: 90%;
+            max-width: 520px;
+            padding: 26px;
+            position: relative;
             max-height: 85vh;
             overflow-y: auto;
         }
-        .modal-content input[type="text"] {
-            width: 100%;
-            padding: 10px;
-            margin-bottom: 12px;
-            background: #0f172a;
-            border: 1px solid #334155;
-            color: white;
-            border-radius: 6px;
+
+        .modal-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 18px;
         }
 
-        .detail-card { text-align: center; }
-        .detail-card img {
-            width: 130px;
-            height: 130px;
-            border-radius: 50%;
-            object-fit: cover;
-            border: 3px solid #38bdf8;
-            margin-bottom: 14px;
+        .close-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 20px;
+            cursor: pointer;
         }
-        .detail-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            text-align: left;
-            margin-top: 14px;
-            font-size: 13px;
+
+        .form-group {
+            margin-bottom: 16px;
         }
-        .detail-item {
-            background: #0f172a;
-            padding: 10px;
-            border-radius: 6px;
-        }
-        .detail-item span {
+
+        .form-group label {
             display: block;
-            color: #94a3b8;
-            font-size: 11px;
-            margin-bottom: 2px;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-weight: 600;
         }
 
-        .emp-list-item {
+        .form-control {
+            width: 100%;
+            padding: 10px 14px;
+            background-color: #0b0f19;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: #fff;
+            outline: none;
+            font-size: 14px;
+        }
+
+        .emp-item {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            background: #0f172a;
             padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-        .emp-list-item img {
-            width: 45px;
-            height: 45px;
-            border-radius: 50%;
-            object-fit: cover;
-            margin-right: 12px;
-            border: 2px solid #38bdf8;
+            border-bottom: 1px solid var(--border-color);
         }
 
-        /* Two Separate Photo Action Buttons */
-        .separate-photo-controls {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        .btn-photo-opt {
-            flex: 1;
-            padding: 9px 12px;
-            font-size: 12px;
-            border-radius: 6px;
-            font-weight: 600;
-            cursor: pointer;
-            border: 1px solid #38bdf8;
-            background: #0f172a;
-            color: #38bdf8;
+        .emp-info {
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: all 0.2s ease;
-        }
-        .btn-photo-opt:hover {
-            background: rgba(56, 189, 248, 0.15);
-        }
-
-        .selected-photos-preview {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 14px;
-            min-height: 50px;
-            background: #0f172a;
-            padding: 8px;
-            border-radius: 6px;
-            border: 1px dashed #334155;
-        }
-        .thumb-preview-wrap {
-            position: relative;
-            width: 50px;
-            height: 50px;
-        }
-        .thumb-preview-wrap img {
-            width: 100%;
-            height: 100%;
-            border-radius: 6px;
-            object-fit: cover;
-            border: 1px solid #38bdf8;
-        }
-        .thumb-preview-wrap .del-btn {
-            position: absolute;
-            top: -4px;
-            right: -4px;
-            background: #ef4444;
-            color: white;
-            border-radius: 50%;
-            width: 16px;
-            height: 16px;
-            font-size: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-        }
-        .camera-container {
-            width: 100%;
-            border-radius: 8px;
-            overflow: hidden;
-            background: #000;
-            position: relative;
-            margin-bottom: 12px;
-        }
-        .camera-container video, .camera-container canvas {
-            width: 100%;
-            height: 240px;
-            object-fit: cover;
-            display: block;
+            gap: 12px;
         }
     </style>
 </head>
 <body>
 
-    <div class="header">
-        <div class="logo-area">
-            <h1>Office Attendance</h1>
+    <!-- Header Section -->
+    <header>
+        <div class="logo-section">
+            <h1 class="logo-title">Office Attendance</h1>
         </div>
         <div class="header-actions">
-            <button class="btn btn-add" onclick="openRegisterModal()"> Register</button>
-            <button class="btn btn-list" onclick="openEmployeeListModal()"> Employee List</button>
-            <div id="liveDot" class="live-dot" title="Server Status"></div>
+            <button class="btn-register" onclick="openRegisterModal()">+ Register</button>
+            <button class="btn-employees" onclick="openEmployeeListModal()">Employee List</button>
+            <button class="btn-clear" onclick="clearDashboard()">Clear Dashboard</button>
+            <button class="btn-restore" onclick="restoreBackup()">Restore Backup</button>
+            <div id="statusDot" class="status-dot" title="Server Connection Status"></div>
         </div>
-    </div>
-
-    <!-- Requirement 6: Hover Navigation Dropdown Menu -->
-    <div class="nav-dropdown-wrapper">
-        <div class="nav-dropdown-trigger" id="currentViewLabel">
-             View Records: All ▾
-        </div>
-        <div class="nav-dropdown-menu">
-            <div class="nav-dropdown-item active" id="filterAll" onclick="setFilter('ALL')"> All Attendance Logs</div>
-            <div class="nav-dropdown-item" id="filterEmp" onclick="setFilter('EMPLOYEES')"> Verified Employees</div>
-            <div class="nav-dropdown-item" id="filterUnknown" onclick="setFilter('UNKNOWN')"> Unknown Visitors</div>
-        </div>
-    </div>
-
-    <div class="cards-grid">
-        <div class="card">
-            <h3>Total Records</h3>
-            <p id="totalRecords" style="color: #38bdf8;">0</p>
-        </div>
-        <div class="card">
-            <h3>Currently In Office</h3>
-            <p id="currentlyInOffice" style="color: #4ade80;">0</p>
-        </div>
-        <div class="card">
-            <h3>Checked Out</h3>
-            <p id="checkedOut" style="color: #c084fc;">0</p>
-        </div>
-    </div>
-
-    <div class="table-container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Log ID</th>
-                    <th style="width: 65px;">Photo</th>
-                    <th>User ID</th>
-                    <th>Name</th>
-                    <th>Login Time (IST)</th>
-                    <th>Logout Time (IST)</th>
-                    <th>Duration</th>
-                    <th>Status</th>
-                    <th>Match Score</th>
-                </tr>
-            </thead>
-            <tbody id="logsTableBody">
-                <tr>
-                    <td colspan="9" style="text-align: center; color: #94a3b8;">Loading attendance data...</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-
-    <!-- Requirement 5: Register Modal with Two Distinct Photo Buttons -->
-    <div id="registerModal" class="modal">
-        <div class="modal-content">
-            <h3 style="color: #38bdf8; margin-bottom: 14px;">Register New Employee</h3>
-            <div style="font-size: 11px; color: #94a3b8; margin-bottom: 12px; background: rgba(56, 189, 248, 0.08); padding: 8px; border-radius: 6px;">
-                 <strong>Photo Required:</strong> Please provide a clear frontal photo using either option below.
-            </div>
-            <form id="registerForm" onsubmit="handleRegister(event)">
-                <input type="text" id="regEmpId" placeholder="Employee ID (e.g. EMP_001)" required>
-                <input type="text" id="regName" placeholder="Full Name (e.g. Himanshu Shukla)" required>
-                
-                <div class="separate-photo-controls">
-                    <button type="button" class="btn-photo-opt" onclick="triggerFileInput()">
-                        Upload Image
-                    </button>
-                    <button type="button" class="btn-photo-opt" onclick="openLiveCameraModal()">
-                        Capture Using Camera
-                    </button>
-                </div>
-                <input type="file" id="regPhotos" accept="image/*" multiple style="display: none;" onchange="handleSystemFilePicked(event)">
-
-                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">Selected Photos:</div>
-                <div id="selectedPhotosContainer" class="selected-photos-preview">
-                    <span style="font-size: 11px; color: #64748b; margin: auto;">No photos added yet</span>
-                </div>
-
-                <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;">
-                    <button type="button" class="btn" style="background: #334155; color: white;" onclick="closeRegisterModal()">Cancel</button>
-                    <button type="submit" id="saveEmpBtn" class="btn btn-add">Save Employee</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Live Camera Capture Modal -->
-    <div id="liveCameraModal" class="modal">
-        <div class="modal-content" style="width: 400px; text-align: center;">
-            <h3 style="color: #38bdf8; margin-bottom: 12px;">Live Face Capture</h3>
-            <div class="camera-container">
-                <video id="webcamVideo" autoplay playsinline></video>
-                <canvas id="snapshotCanvas" style="display: none;"></canvas>
-            </div>
-            <p id="camGuidance" style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;">Look directly into camera and hold steady.</p>
-            <div style="display: flex; justify-content: center; gap: 10px;">
-                <button type="button" id="snapBtn" class="btn btn-add" onclick="captureLiveSnapshot()">📸 Capture</button>
-                <button type="button" id="retakeBtn" class="btn" style="background: #f59e0b; color: white; display: none;" onclick="retakeLiveSnapshot()">🔄 Retake</button>
-                <button type="button" id="usePhotoBtn" class="btn" style="background: #10b981; color: white; display: none;" onclick="useCapturedPhoto()">✅ Save Photo</button>
-                <button type="button" class="btn" style="background: #334155; color: white;" onclick="closeLiveCameraModal()">Close</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Employee Directory Modal with Accessible Delete Controls -->
-    <div id="empListModal" class="modal">
-        <div class="modal-content">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                <h3 style="color: #c084fc;"> Registered Employees</h3>
-                <button class="btn btn-add" style="padding: 4px 10px;" onclick="closeEmployeeListModal(); openRegisterModal();">+ Add New</button>
-            </div>
-            <div id="empListContainer">
-                <p style="color: #94a3b8; font-size: 13px;">Loading employees...</p>
-            </div>
-            <div style="text-align: right; margin-top: 14px;">
-                <button class="btn" style="background: #334155; color: white;" onclick="closeEmployeeListModal()">Close</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Detail Drawer Modal -->
-    <div id="detailModal" class="modal">
-        <div class="modal-content detail-card">
-            <h3 style="color: #38bdf8; margin-bottom: 12px;">Attendance Details</h3>
-            <img id="detailImg" src="" alt="Face">
-            <div class="detail-grid">
-                <div class="detail-item"><span>Log ID</span><strong id="dLogId">-</strong></div>
-                <div class="detail-item"><span>User ID</span><strong id="dUserId">-</strong></div>
-                <div class="detail-item"><span>Name</span><strong id="dName">-</strong></div>
-                <div class="detail-item"><span>Status</span><strong id="dStatus">-</strong></div>
-                <div class="detail-item"><span>Login Time</span><strong id="dLogin">-</strong></div>
-                <div class="detail-item"><span>Logout Time</span><strong id="dLogout">-</strong></div>
-                <div class="detail-item"><span>Duration</span><strong id="dDuration">-</strong></div>
-                <div class="detail-item"><span>Match Score</span><strong id="dScore">-</strong></div>
-            </div>
-            <button class="btn" style="background: #334155; color: white; width: 100%; margin-top: 16px; justify-content: center;" onclick="closeDetailModal()">Close</button>
-        </div>
-    </div>
-
-    <script src="app.js"></script>
-</body>
-</html>

@@ -15,7 +15,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|buffer_size;10
 BACKEND_URL = "http://127.0.0.1:8000/api/attendance/process"
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# Gate 1 (LOGIN) = Local Laptop Webcam
+# Gate 1 (LOGIN) = Local Laptop Webcam (Index 0)
 CAM_LOGIN_SRC = 0
 
 # Gate 2 (LOGOUT) = Office RTSP Camera (.178)
@@ -123,6 +123,7 @@ def extract_ultra_hd_face(clean_frame, box, target_size=(360, 360)):
 def send_frame_to_backend(cropped_face, camera_type: str):
     def _worker():
         try:
+            start_t = time.time()
             success, encoded_img = cv2.imencode('.jpg', cropped_face, [int(cv2.IMWRITE_JPEG_QUALITY), 98])
             if not success:
                 return
@@ -131,21 +132,22 @@ def send_frame_to_backend(cropped_face, camera_type: str):
             data = {'camera_type': camera_type}
             
             response = requests.post(BACKEND_URL, files=files, data=data, timeout=4)
+            elapsed = (time.time() - start_t) * 1000
             if response.status_code == 200:
                 res = response.json()
                 status = res.get('status')
                 user_id = res.get('user_id', 'None')
                 score = res.get('similarity_score', 'None')
-                print(f"[{camera_type}] Status: {status} | User: {user_id} | Score: {score}")
+                print(f"[{camera_type} {elapsed:.0f}ms] Result: {status} | User: {user_id} | Score: {score}")
             else:
                 print(f"[{camera_type} HTTP {response.status_code}] -> {response.text}")
         except Exception as e:
-            print(f"[{camera_type} Network Error] -> {e}")
+            print(f"[{camera_type} Net Error] -> {e}")
 
     threading.Thread(target=_worker, daemon=True).start()
 
 def run_hybrid_streams():
-    print("[*] Starting Hybrid Camera Attendance Pipeline...")
+    print("[*] Starting Stabilized Hybrid Attendance Stream...")
     print("    - LOGIN CAMERA  : Laptop Webcam (Index 0)")
     print("    - LOGOUT CAMERA : Office RTSP (.178)")
     print("[*] Press 'q' to quit.")
@@ -162,7 +164,6 @@ def run_hybrid_streams():
         ret_out, frame_out = stream_logout.read()
         current_time = time.time()
 
-        # Gate 1: Laptop Cam (LOGIN)
         if ret_in and frame_in is not None:
             raw_clean_in = frame_in.copy()
             rgb_in = cv2.cvtColor(frame_in, cv2.COLOR_BGR2RGB)
@@ -185,7 +186,6 @@ def run_hybrid_streams():
         else:
             time.sleep(0.01)
 
-        # Gate 2: Office RTSP Cam (LOGOUT)
         if ret_out and frame_out is not None:
             raw_clean_out = frame_out.copy()
             rgb_out = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)

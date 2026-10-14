@@ -6,7 +6,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,9 +35,9 @@ EMPLOYEE_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# Calibrated Threshold: 0.68 accounts for RTSP H.264 compression and local webcam variations
-# Legitimate cross-camera matches score 0.70 - 0.88; strangers score < 0.50
-RECOGNITION_THRESHOLD = 0.68
+# Calibrated Thresholds
+RECOGNITION_THRESHOLD = 0.68       # Genuine match confidence
+UNCERTAIN_LOWER_THRESHOLD = 0.55   # Scores between 0.55 and 0.68 are treated as Uncertain/Preserved
 
 def get_current_ist() -> datetime:
     return datetime.now(IST)
@@ -89,7 +89,7 @@ app.add_middleware(
 app.mount("/employee_photos", StaticFiles(directory=str(EMPLOYEE_PHOTOS_DIR)), name="employee_photos")
 app.mount("/captures", StaticFiles(directory=str(CAPTURES_DIR)), name="captures")
 
-# Deep Learning Setup
+# PyTorch InceptionResnetV1 Vision Model
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 registration_mtcnn = MTCNN(image_size=160, margin=14, keep_all=False, device=device)
 resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
@@ -107,17 +107,21 @@ def clean_to_1d_flat_vector(raw_vector: Any) -> np.ndarray:
         return arr
     return arr / norm
 
-def check_image_blur(cv_img: np.ndarray, min_variance: float = 25.0) -> bool:
+def check_image_blur(cv_img: np.ndarray, min_variance: float = 25.0) -> tuple[bool, float]:
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    variance = cv2.Laplacian(gray, cv2.CV_64F).var()
-    return bool(variance >= min_variance)
+    variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    return (variance >= min_variance), variance
 
-def extract_embedding_from_bytes(image_bytes: bytes) -> np.ndarray:
+def extract_embedding_from_bytes(image_bytes: bytes) -> tuple[np.ndarray, float]:
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    _, blur_val = check_image_blur(cv_img if cv_img is not None else np.zeros((100, 100, 3), np.uint8))
+    
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     tensor = transform(img).unsqueeze(0).to(device)
     with torch.no_grad():
         raw_embedding = resnet(tensor).squeeze().cpu().numpy()
-    return clean_to_1d_flat_vector(raw_embedding)
+    return clean_to_1d_flat_vector(raw_embedding), blur_val
 
 def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.ndarray, Image.Image]:
     np_arr = np.frombuffer(image_bytes, np.uint8)
@@ -125,7 +129,8 @@ def extract_face_and_embedding_for_registration(image_bytes: bytes) -> tuple[np.
     if cv_img is None:
         raise ValueError("Invalid image file format.")
 
-    if not check_image_blur(cv_img, min_variance=25.0):
+    is_sharp, _ = check_image_blur(cv_img, min_variance=25.0)
+    if not is_sharp:
         raise ValueError("Image is too blurry. Please capture steady frontal photo.")
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -150,10 +155,24 @@ def calculate_cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     dot_val = float(np.dot(v1, v2))
     return float(max(0.0, min(1.0, dot_val)))
 
+# Global State
 REGISTERED_USERS: Dict[str, Dict[str, Any]] = {}
 attendance_records: List[Dict[str, Any]] = []
 recent_unknown_vectors: List[Dict[str, Any]] = []
 employee_attendance_cooldown: Dict[str, float] = {}
+
+# Temporal Smoothing & Identity Retention Cache (Prevents Single-Frame Drops)
+# Structure: { camera_type: { 'user_id': str, 'name': str, 'last_seen': float, 'confidence': float } }
+TEMPORAL_IDENTITY_LOCK: Dict[str, Dict[str, Any]] = {
+    "LOGIN": {},
+    "LOGOUT": {}
+}
+
+# Consecutive Failure Buffer (Prevents premature unknown visitor creation)
+UNKNOWN_CONSECUTIVE_BUFFER: Dict[str, int] = {
+    "LOGIN": 0,
+    "LOGOUT": 0
+}
 
 def ensure_schema_compatibility(conn):
     with conn.cursor() as cur:
@@ -235,13 +254,22 @@ def init_db_and_load_state():
 
 init_db_and_load_state()
 
-def identify_face(incoming_embedding: np.ndarray, threshold: float = RECOGNITION_THRESHOLD) -> tuple[str, str, float, bool]:
+def identify_face_stabilized(incoming_embedding: np.ndarray, camera_type: str, sharpness: float) -> tuple[str, str, float, str]:
+    """
+    Stabilized Face Recognition with Temporal Smoothing:
+    Returns (user_id, name, score, match_state)
+    match_state: 'REGISTERED' | 'UNCERTAIN_PRESERVED' | 'CONFIRMED_UNKNOWN'
+    """
+    global TEMPORAL_IDENTITY_LOCK, UNKNOWN_CONSECUTIVE_BUFFER
+
     best_user_id = None
     best_name = None
     highest_score = 0.0
 
     in_vec = clean_to_1d_flat_vector(incoming_embedding)
+    now_ts = time.time()
 
+    # Step 1: Vector matching against all registered employees
     for uid, data in REGISTERED_USERS.items():
         for reg_vec in data.get("embeddings", []):
             score = calculate_cosine_similarity(in_vec, reg_vec)
@@ -250,12 +278,43 @@ def identify_face(incoming_embedding: np.ndarray, threshold: float = RECOGNITION
                 best_user_id = uid
                 best_name = data["name"]
 
-    print(f"[DEBUG INFERENCE] Top Match: {best_user_id} ({best_name}) | Score: {highest_score:.4f} | Threshold: {threshold}")
+    print(f"[{camera_type} TELEMETRY] Raw Match: {best_user_id} | Score: {highest_score:.4f} | Sharpness: {sharpness:.1f}")
 
-    if highest_score >= threshold and best_user_id:
-        return best_user_id, best_name, highest_score, False
+    # Step 2: High Confidence Match
+    if highest_score >= RECOGNITION_THRESHOLD and best_user_id:
+        TEMPORAL_IDENTITY_LOCK[camera_type] = {
+            "user_id": best_user_id,
+            "name": best_name,
+            "last_seen": now_ts,
+            "confidence": highest_score
+        }
+        UNKNOWN_CONSECUTIVE_BUFFER[camera_type] = 0
+        return best_user_id, best_name, highest_score, "REGISTERED"
 
-    return "UNKNOWN", "Unknown Visitor", highest_score, True
+    # Step 3: Uncertain or Temporary Dip Handling (Temporal Smoothing Lock)
+    # If the employee was recognized within the last 4.0 seconds, do NOT immediately flip to unknown!
+    locked = TEMPORAL_IDENTITY_LOCK.get(camera_type, {})
+    if locked and (now_ts - locked.get("last_seen", 0.0) < 4.0):
+        # Temporary drop due to tilt/blink/lighting: Preserve previous identity
+        preserved_id = locked["user_id"]
+        preserved_name = locked["name"]
+        print(f"[{camera_type} STABILIZER] Preserving {preserved_id} ({preserved_name}) over temporary score drop ({highest_score:.3f})")
+        return preserved_id, preserved_name, highest_score, "UNCERTAIN_PRESERVED"
+
+    # Step 4: Uncertain Range (0.55 - 0.68) without previous lock -> Suppress unknown creation
+    if highest_score >= UNCERTAIN_LOWER_THRESHOLD:
+        print(f"[{camera_type} STABILIZER] Score {highest_score:.3f} is in uncertain band. Suppressing unknown visitor creation.")
+        return "UNCERTAIN", "Evaluating...", highest_score, "UNCERTAIN_PRESERVED"
+
+    # Step 5: Low confidence: Require consecutive frames before confirming Unknown Visitor
+    UNKNOWN_CONSECUTIVE_BUFFER[camera_type] = UNKNOWN_CONSECUTIVE_BUFFER.get(camera_type, 0) + 1
+    if UNKNOWN_CONSECUTIVE_BUFFER[camera_type] < 2:
+        print(f"[{camera_type} STABILIZER] Low match candidate (Frame {UNKNOWN_CONSECUTIVE_BUFFER[camera_type]}/2). Holding...")
+        return "EVALUATING", "Evaluating...", highest_score, "UNCERTAIN_PRESERVED"
+
+    # Confirmed Genuine Unknown Visitor
+    TEMPORAL_IDENTITY_LOCK[camera_type] = {}
+    return "UNKNOWN", "Unknown Visitor", highest_score, "CONFIRMED_UNKNOWN"
 
 def check_is_new_unknown(incoming_embedding: np.ndarray) -> bool:
     global recent_unknown_vectors
@@ -282,7 +341,7 @@ def save_unknown_photo(image_bytes: bytes) -> str:
     img.save(filepath, "JPEG", quality=95)
     return f"http://127.0.0.1:8000/captures/unknown/{filename}"
 
-def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float, is_unknown: bool):
+def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str, score: float, match_state: str):
     global attendance_records, employee_attendance_cooldown
     now_ist = get_current_ist()
     time_str = format_timestamp(now_ist)
@@ -291,7 +350,14 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     conn = get_mysql_connection()
 
-    if is_unknown:
+    # Case A: Uncertain / Suppressed Frame (Do NOT write or pollute database)
+    if match_state == "UNCERTAIN_PRESERVED" and user_id in ["UNCERTAIN", "EVALUATING"]:
+        if conn:
+            conn.close()
+        return "uncertain_suppressed", attendance_records
+
+    # Case B: Confirmed Unknown Visitor
+    if match_state == "CONFIRMED_UNKNOWN" or user_id == "UNKNOWN":
         new_entry = {
             "id": len(attendance_records) + 1,
             "user_id": "UNKNOWN",
@@ -317,7 +383,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
         attendance_records.insert(0, new_entry)
         return "unknown_detected", attendance_records
 
-    # Registered Employee Logic:
+    # Case C: Verified or Temporarily Preserved Registered Employee
     last_marked = employee_attendance_cooldown.get(user_id, 0.0)
     active_record = None
     for r in attendance_records:
@@ -327,13 +393,12 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     if camera_type == "LOGIN":
         if active_record:
-            # Already active in office: Update live score without adding duplicate row
+            # Employee already active: Update live score without creating duplicate row
             active_record["similarity_score"] = score_display
             if conn:
                 conn.close()
             return "already_logged_in", attendance_records
 
-        # Debounce: Do not insert if employee already marked within 30 seconds
         if current_ts - last_marked < 30.0:
             if conn:
                 conn.close()
@@ -369,7 +434,6 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
 
     elif camera_type == "LOGOUT":
         if not active_record:
-            # Fallback if employee was not logged in prior: mark independent logout
             display_photo = REGISTERED_USERS.get(user_id, {}).get("photo_url") or photo_url
             new_entry = {
                 "id": len(attendance_records) + 1,
@@ -396,7 +460,7 @@ def record_attendance(user_id: str, name: str, camera_type: str, photo_url: str,
             attendance_records.insert(0, new_entry)
             return "logout_recorded", attendance_records
 
-        # Complete Active Session
+        # Finish Active Session
         duration_calc = calculate_duration(str(active_record["login_time"]), now_ist)
         active_record["logout_time"] = time_str
         active_record["duration"] = duration_calc
@@ -551,9 +615,24 @@ async def register_employee(
 async def process_attendance(file: UploadFile = File(...), camera_type: str = Form(...)):
     try:
         image_bytes = await file.read()
-        embedding = extract_embedding_from_bytes(image_bytes)
+        embedding, sharpness = extract_embedding_from_bytes(image_bytes)
 
-        user_id, name, score, is_unknown = identify_face(incoming_embedding=embedding, threshold=RECOGNITION_THRESHOLD)
+        user_id, name, score, match_state = identify_face_stabilized(
+            incoming_embedding=embedding,
+            camera_type=camera_type.upper(),
+            sharpness=sharpness
+        )
+
+        if match_state == "UNCERTAIN_PRESERVED" and user_id in ["UNCERTAIN", "EVALUATING"]:
+            # Suppress frame: do not record attendance or spam dashboard
+            return {
+                "status": "uncertain_evaluating",
+                "user_id": user_id,
+                "similarity_score": round(score, 3),
+                "is_unknown": False
+            }
+
+        is_unknown = (match_state == "CONFIRMED_UNKNOWN")
 
         if is_unknown:
             is_new_unknown = check_is_new_unknown(embedding)
@@ -575,7 +654,7 @@ async def process_attendance(file: UploadFile = File(...), camera_type: str = Fo
         else:
             photo_url = REGISTERED_USERS.get(user_id, {}).get("photo_url") or convert_bytes_to_base64_data_url(image_bytes)
 
-        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score, is_unknown)
+        action, current_logs = record_attendance(user_id, name, camera_type.upper(), photo_url, score, match_state)
 
         await manager.broadcast({
             "event": "ATTENDANCE_UPDATE",

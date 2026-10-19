@@ -4,3 +4,11 @@ __pycache__/
 .env
 backend/captures/*.jpg
 captures/*.jpg
+.env
+stream_venv/
+backend_venv/
+.venv312/
+__pycache__/
+*.pyc
+captures/
+employee_photos/

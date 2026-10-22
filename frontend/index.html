@@ -1,947 +1,775 @@
 <!DOCTYPE html>
-
 <html lang="en">
-
 <head>
-
     <meta charset="UTF-8">
-
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
+    <meta name="theme-color" content="#0d111a">
     <title>Office Attendance Portal</title>
 
     <style>
-
         :root {
-
             --bg-base: #0d111a;
-
             --bg-card: #131b2a;
-
             --border-color: #1e293b;
-
             --text-main: #f8fafc;
-
             --text-muted: #94a3b8;
-
             --accent-blue: #3b82f6;
-
             --accent-green: #10b981;
-
             --accent-red: #ef4444;
-
             --accent-purple: #8b5cf6;
-
             --accent-amber: #f59e0b;
-
         }
-
-
 
         * {
-
             box-sizing: border-box;
-
             margin: 0;
-
             padding: 0;
-
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                Roboto, Helvetica, Arial, sans-serif;
         }
-
-
 
         body {
-
-            background-color: var(--bg-base);
-
+            background: var(--bg-base);
             color: var(--text-main);
-
             padding: 24px 32px;
-
             min-height: 100vh;
-
         }
-
-
-
-        /* Top Header */
 
         header {
-
             display: flex;
-
             justify-content: space-between;
-
             align-items: center;
-
+            gap: 20px;
+            flex-wrap: wrap;
             padding-bottom: 20px;
-
             border-bottom: 1px solid var(--border-color);
-
             margin-bottom: 24px;
-
         }
-
-
 
         .logo-title {
-
             font-size: 26px;
-
             font-weight: 700;
-
             background: linear-gradient(135deg, #60a5fa, #c084fc);
-
             -webkit-background-clip: text;
-
+            background-clip: text;
             -webkit-text-fill-color: transparent;
-
         }
-
-
 
         .header-actions {
-
             display: flex;
-
             align-items: center;
-
             gap: 12px;
-
+            flex-wrap: wrap;
         }
-
-
 
         .status-dot {
-
             width: 12px;
-
             height: 12px;
-
+            flex-shrink: 0;
             border-radius: 50%;
-
-            background-color: #64748b;
-
+            background: #64748b;
             box-shadow: 0 0 6px rgba(100, 116, 139, 0.4);
-
-            transition: all 0.3s ease;
-
         }
-
-
 
         .status-dot.connected {
-
-            background-color: var(--accent-green);
-
+            background: var(--accent-green);
             box-shadow: 0 0 10px rgba(16, 185, 129, 0.9);
-
         }
-
-
 
         button {
-
             border: none;
-
             padding: 9px 16px;
-
             border-radius: 8px;
-
             font-size: 13px;
-
             font-weight: 600;
-
             cursor: pointer;
-
-            transition: all 0.2s ease;
-
+            transition: filter 0.2s ease, transform 0.2s ease;
             display: inline-flex;
-
             align-items: center;
-
+            justify-content: center;
             gap: 6px;
-
         }
-
-
 
         button:hover {
-
-            filter: brightness(1.15);
-
+            filter: brightness(1.12);
             transform: translateY(-1px);
-
         }
 
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
 
+        .btn-register {
+            background: var(--accent-blue);
+            color: #fff;
+        }
 
-        .btn-register { background-color: var(--accent-blue); color: #fff; }
+        .btn-employees {
+            background: var(--accent-purple);
+            color: #fff;
+        }
 
-        .btn-employees { background-color: var(--accent-purple); color: #fff; }
+        .btn-clear {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
 
-        .btn-clear { background-color: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
-
-        .btn-restore { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
-
-
-
-        /* Metric Stats Cards */
+        .btn-restore {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+        }
 
         .stats-grid {
-
             display: grid;
-
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 16px;
-
             margin-bottom: 24px;
-
         }
-
-
 
         .stat-card {
-
-            background-color: var(--bg-card);
-
+            background: var(--bg-card);
             border: 1px solid var(--border-color);
-
             border-radius: 12px;
-
             padding: 20px;
-
+            min-width: 0;
         }
-
-
 
         .stat-label {
-
             font-size: 12px;
-
             text-transform: uppercase;
-
             letter-spacing: 0.05em;
-
             color: var(--text-muted);
-
             margin-bottom: 8px;
-
             font-weight: 600;
-
         }
-
-
 
         .stat-value {
-
             font-size: 34px;
-
             font-weight: 700;
-
         }
 
+        .stat-value.total {
+            color: #60a5fa;
+        }
 
+        .stat-value.in-office {
+            color: #34d399;
+        }
 
-        .stat-value.total { color: #60a5fa; }
+        .stat-value.checked-out {
+            color: #a78bfa;
+        }
 
-        .stat-value.in-office { color: #34d399; }
-
-        .stat-value.checked-out { color: #a78bfa; }
-
-        .stat-value.unauthorized { color: #f87171; }
-
-
-
-        /* Filter Controls */
+        .stat-value.unauthorized {
+            color: #f87171;
+        }
 
         .toolbar {
-
             display: flex;
-
             justify-content: space-between;
-
             align-items: center;
-
             margin-bottom: 16px;
-
+            gap: 12px;
         }
-
-
 
         .filter-select {
-
-            background-color: var(--bg-card);
-
+            background: var(--bg-card);
             border: 1px solid var(--border-color);
-
             color: var(--text-main);
-
             padding: 9px 16px;
-
             border-radius: 8px;
-
             font-size: 13px;
-
             outline: none;
-
             cursor: pointer;
-
+            max-width: 100%;
         }
-
-
-
-        /* Table */
 
         .table-container {
-
-            background-color: var(--bg-card);
-
+            background: var(--bg-card);
             border: 1px solid var(--border-color);
-
             border-radius: 12px;
-
-            overflow: hidden;
-
+            overflow-x: auto;
             box-shadow: 0 4px 25px rgba(0, 0, 0, 0.4);
-
         }
-
-
 
         table {
-
             width: 100%;
-
+            min-width: 950px;
             border-collapse: collapse;
-
             text-align: left;
-
             font-size: 14px;
-
         }
-
-
 
         th {
-
-            background-color: #172033;
-
+            background: #172033;
             color: var(--text-muted);
-
             font-weight: 600;
-
             padding: 14px 18px;
-
             border-bottom: 1px solid var(--border-color);
-
             text-transform: uppercase;
-
             font-size: 11px;
-
             letter-spacing: 0.05em;
-
+            white-space: nowrap;
         }
-
-
 
         td {
-
             padding: 12px 18px;
-
             border-bottom: 1px solid var(--border-color);
-
             color: var(--text-main);
-
             vertical-align: middle;
-
         }
 
-
-
-        tr:hover {
-
-            background-color: rgba(255, 255, 255, 0.02);
-
+        tbody tr:hover {
+            background: rgba(255, 255, 255, 0.02);
         }
-
-
 
         .photo-wrapper {
-
             position: relative;
-
             display: inline-block;
-
             width: 44px;
-
             height: 44px;
-
         }
-
-
 
         .avatar-img {
-
             width: 44px;
-
             height: 44px;
-
             border-radius: 50%;
-
             object-fit: cover;
-
             border: 2px solid #334155;
-
-            background-color: #0f172a;
-
+            background: #0f172a;
             cursor: pointer;
-
-            transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s ease;
-
+            transition: transform 0.25s ease;
         }
-
-
-
-        .avatar-img:hover {
-
-            transform: scale(3.2);
-
-            border-radius: 8px;
-
-            z-index: 999;
-
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.9);
-
-            border-color: var(--accent-blue);
-
-        }
-
-
 
         .badge {
-
             display: inline-block;
-
             padding: 4px 10px;
-
             border-radius: 20px;
-
             font-size: 11px;
-
             font-weight: 700;
-
             letter-spacing: 0.04em;
-
+            white-space: nowrap;
         }
 
+        .badge-success {
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
 
+        .badge-checkedout {
+            background: rgba(148, 163, 184, 0.15);
+            color: #cbd5e1;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+        }
 
-        .badge-success { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-
-        .badge-checkedout { background-color: rgba(148, 163, 184, 0.15); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.3); }
-
-        .badge-danger { background-color: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-
-
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
 
         .score-pill {
-
             font-family: monospace;
-
-            background-color: #0b0f19;
-
+            background: #0b0f19;
             padding: 3px 8px;
-
             border-radius: 6px;
-
             border: 1px solid #1e293b;
-
             color: #38bdf8;
-
             font-size: 12px;
-
         }
-
-
-
-        /* Modal Styles */
 
         .modal {
-
             display: none;
-
             position: fixed;
-
-            top: 0;
-
-            left: 0;
-
-            width: 100vw;
-
-            height: 100vh;
-
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            padding: 18px;
             background: rgba(0, 0, 0, 0.75);
-
             backdrop-filter: blur(4px);
-
             justify-content: center;
-
             align-items: center;
-
             z-index: 1000;
-
         }
-
-
 
         .modal-content {
-
             background: var(--bg-card);
-
             border: 1px solid var(--border-color);
-
             border-radius: 14px;
-
-            width: 90%;
-
+            width: 100%;
             max-width: 560px;
-
             padding: 26px;
-
             position: relative;
-
             max-height: 90vh;
-
             overflow-y: auto;
-
         }
 
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 18px;
+            padding-right: 28px;
+            overflow-wrap: anywhere;
+        }
 
+        .close-btn {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 4px 8px;
+        }
 
-        .modal-title { font-size: 20px; font-weight: 700; margin-bottom: 18px; }
+        .form-group {
+            margin-bottom: 16px;
+        }
 
-        .close-btn { position: absolute; top: 18px; right: 18px; background: none; border: none; color: var(--text-muted); font-size: 24px; cursor: pointer; }
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
 
-        .form-group { margin-bottom: 16px; }
+        .form-control {
+            width: 100%;
+            padding: 10px 14px;
+            background: #0b0f19;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: #fff;
+            outline: none;
+            font-size: 14px;
+        }
 
-        .form-group label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
-
-        .form-control { width: 100%; padding: 10px 14px; background-color: #0b0f19; border: 1px solid var(--border-color); border-radius: 8px; color: #fff; outline: none; font-size: 14px; }
-
-        
+        .form-control:focus {
+            border-color: var(--accent-blue);
+        }
 
         .upload-options {
-
             display: flex;
-
             gap: 12px;
-
             margin-bottom: 14px;
-
         }
-
-
 
         .tab-btn {
-
             flex: 1;
-
-            padding: 8px 12px;
-
+            padding: 10px 12px;
             background: #1e293b;
-
             color: #cbd5e1;
-
             border-radius: 6px;
-
             text-align: center;
-
             cursor: pointer;
-
             font-size: 13px;
-
             font-weight: 600;
-
         }
-
-
 
         .tab-btn.active {
-
             background: var(--accent-blue);
-
             color: #fff;
-
         }
-
-
 
         #liveCameraBox {
-
             display: none;
-
             flex-direction: column;
-
             align-items: center;
-
             gap: 10px;
-
             background: #0b0f19;
-
             border: 1px solid var(--border-color);
-
             border-radius: 8px;
-
             padding: 12px;
-
             margin-bottom: 14px;
-
         }
 
-
-
-        #webcamVideo {
-
+        #webcamVideo,
+        #cameraPreview {
             width: 100%;
-
             max-height: 260px;
-
             border-radius: 6px;
-
             background: #000;
-
-            object-fit: cover;
-
+            object-fit: contain;
         }
-
-
 
         #cameraPreview {
-
             display: none;
-
-            width: 100%;
-
-            max-height: 260px;
-
-            border-radius: 6px;
-
-            object-fit: cover;
-
             border: 2px solid var(--accent-green);
-
         }
 
+        .emp-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
 
+        .emp-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
 
-        .emp-item { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); }
+        .photo-comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 20px;
+        }
 
-        .emp-info { display: flex; align-items: center; gap: 12px; }
+        .comparison-photo {
+            width: 100%;
+            height: 250px;
+            object-fit: contain;
+            background: #0b0f19;
+            border-radius: 8px;
+            border: 2px solid #334155;
+        }
 
+        .comparison-label {
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        @media (max-width: 1000px) {
+            body {
+                padding: 18px;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 12px;
+            }
+
+            header {
+                align-items: flex-start;
+            }
+
+            .header-actions {
+                width: 100%;
+            }
+
+            .header-actions button {
+                flex: 1 1 calc(50% - 8px);
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }
+
+            .stat-card {
+                padding: 14px;
+            }
+
+            .stat-value {
+                font-size: 28px;
+            }
+
+            .modal-content {
+                padding: 20px 14px;
+            }
+
+            .photo-comparison-grid {
+                gap: 10px;
+            }
+
+            .comparison-photo {
+                height: 160px;
+            }
+
+            .emp-item {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+        }
     </style>
-
 </head>
 
 <body>
-
-
-
-    <!-- Header -->
-
     <header>
-
         <h1 class="logo-title">Office Attendance</h1>
 
         <div class="header-actions">
+            <button type="button" class="btn-register" onclick="openRegisterModal()">
+                + Register
+            </button>
 
-            <button class="btn-register" onclick="openRegisterModal()">+ Register</button>
+            <button type="button" class="btn-employees" onclick="openEmployeeListModal()">
+                Employee List
+            </button>
 
-            <button class="btn-employees" onclick="openEmployeeListModal()">Employee List</button>
+            <button type="button" class="btn-clear" onclick="clearDashboard()">
+                Clear Dashboard
+            </button>
 
-            <button class="btn-clear" onclick="clearDashboard()">Clear Dashboard</button>
+            <button type="button" class="btn-restore" onclick="restoreBackup()">
+                Restore Backup
+            </button>
 
-            <button class="btn-restore" onclick="restoreBackup()">Restore Backup</button>
-
-            <div id="statusDot" class="status-dot" title="Server Live Connection"></div>
-
+            <div id="statusDot" class="status-dot" title="Server live connection"></div>
         </div>
-
     </header>
 
+    <main>
+        <section class="stats-grid" aria-label="Attendance statistics">
+            <div class="stat-card">
+                <div class="stat-label">Total Records</div>
+                <div id="statTotal" class="stat-value total">0</div>
+            </div>
 
+            <div class="stat-card">
+                <div class="stat-label">Currently In Office</div>
+                <div id="statInOffice" class="stat-value in-office">0</div>
+            </div>
 
-    <!-- Stats Cards -->
+            <div class="stat-card">
+                <div class="stat-label">Checked Out</div>
+                <div id="statCheckedOut" class="stat-value checked-out">0</div>
+            </div>
 
-    <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Unknown Visitors</div>
+                <div id="statUnauthorized" class="stat-value unauthorized">0</div>
+            </div>
+        </section>
 
-        <div class="stat-card">
-
-            <div class="stat-label">Total Records</div>
-
-            <div id="statTotal" class="stat-value total">0</div>
-
-        </div>
-
-        <div class="stat-card">
-
-            <div class="stat-label">Currently In Office</div>
-
-            <div id="statInOffice" class="stat-value in-office">0</div>
-
-        </div>
-
-        <div class="stat-card">
-
-            <div class="stat-label">Checked Out</div>
-
-            <div id="statCheckedOut" class="stat-value checked-out">0</div>
-
-        </div>
-
-        <div class="stat-card">
-
-            <div class="stat-label">Unknown Visitors</div>
-
-            <div id="statUnauthorized" class="stat-value unauthorized">0</div>
-
-        </div>
-
-    </div>
-
-
-
-    <!-- Filter Toolbar -->
-
-    <div class="toolbar">
-
-        <div>
+        <section class="toolbar" aria-label="Attendance filters">
+            <label for="recordFilter" class="stat-label">Filter attendance</label>
 
             <select id="recordFilter" class="filter-select" onchange="filterRecords()">
-
                 <option value="ALL">View Records: All</option>
-
                 <option value="IN_OFFICE">Status: In Office Only</option>
-
                 <option value="CHECKED_OUT">Status: Checked Out Only</option>
-
                 <option value="UNAUTHORIZED">Status: Unknown Visitors Only</option>
-
             </select>
+        </section>
 
-        </div>
+        <section class="table-container" aria-label="Attendance records">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Log ID</th>
+                        <th>Photo</th>
+                        <th>User ID</th>
+                        <th>Name</th>
+                        <th>Login Time (IST)</th>
+                        <th>Logout Time (IST)</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                        <th>Match Score</th>
+                    </tr>
+                </thead>
 
-    </div>
+                <tbody id="attendanceTableBody">
+                    <tr>
+                        <td colspan="9" style="text-align:center;color:var(--text-muted);padding:40px;">
+                            Loading attendance logs...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
 
-
-
-    <!-- Attendance Table -->
-
-    <div class="table-container">
-
-        <table>
-
-            <thead>
-
-                <tr>
-
-                    <th>Log ID</th>
-
-                    <th>Photo</th>
-
-                    <th>User ID</th>
-
-                    <th>Name</th>
-
-                    <th>Login Time (IST)</th>
-
-                    <th>Logout Time (IST)</th>
-
-                    <th>Duration</th>
-
-                    <th>Status</th>
-
-                    <th>Match Score</th>
-
-                </tr>
-
-            </thead>
-
-            <tbody id="attendanceTableBody">
-
-                <tr>
-
-                    <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 40px;">
-
-                        Loading attendance logs...
-
-                    </td>
-
-                </tr>
-
-            </tbody>
-
-        </table>
-
-    </div>
-
-
-
-    <!-- Register Modal -->
-
-    <div id="registerModal" class="modal">
-
+    <!-- Employee Registration Modal -->
+    <div id="registerModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="registerModalTitle">
         <div class="modal-content">
+            <button type="button" class="close-btn" aria-label="Close registration" onclick="closeRegisterModal()">
+                &times;
+            </button>
 
-            <button class="close-btn" onclick="closeRegisterModal()">&times;</button>
-
-            <h2 class="modal-title">Register New Employee</h2>
-
-            
+            <h2 id="registerModalTitle" class="modal-title">Register New Employee</h2>
 
             <form id="registerForm" onsubmit="handleRegisterSubmit(event)">
-
                 <div class="form-group">
-
-                    <label>User ID (Unique Employee ID)</label>
-
-                    <input type="text" id="regEmpId" class="form-control" placeholder="e.g. Emp_01" required>
-
+                    <label for="regEmpId">User ID (Unique Employee ID)</label>
+                    <input
+                        type="text"
+                        id="regEmpId"
+                        class="form-control"
+                        placeholder="e.g. Emp_01"
+                        maxlength="50"
+                        required
+                    >
                 </div>
 
-
-
                 <div class="form-group">
-
-                    <label>User Name (Full Name)</label>
-
-                    <input type="text" id="regName" class="form-control" placeholder="e.g. Himanshu Shukla" required>
-
+                    <label for="regName">User Name (Full Name)</label>
+                    <input
+                        type="text"
+                        id="regName"
+                        class="form-control"
+                        placeholder="e.g. Employee Name"
+                        maxlength="100"
+                        required
+                    >
                 </div>
 
-
-
-                <label style="display:block; font-size:12px; color:var(--text-muted); margin-bottom:6px; font-weight:600;">Choose Photo Method</label>
+                <label class="stat-label" style="display:block;margin-bottom:8px;">
+                    Choose Photo Method
+                </label>
 
                 <div class="upload-options">
+                    <button type="button" id="tabFile" class="tab-btn active" onclick="switchPhotoTab('file')">
+                        Select Photo File(s)
+                    </button>
 
-                    <div id="tabFile" class="tab-btn active" onclick="switchPhotoTab('file')">📁 Select File Picture</div>
-
-                    <div id="tabCamera" class="tab-btn" onclick="switchPhotoTab('camera')">📸 Capture Live Photo</div>
-
+                    <button type="button" id="tabCamera" class="tab-btn" onclick="switchPhotoTab('camera')">
+                        Capture Live Photo
+                    </button>
                 </div>
-
-
 
                 <div id="fileUploadBox" class="form-group">
-
-                    <input type="file" id="regPhotoFile" class="form-control" accept="image/*">
-
+                    <label for="regPhotoFile">Employee face photo(s)</label>
+                    <input
+                        type="file"
+                        id="regPhotoFile"
+                        class="form-control"
+                        accept="image/*"
+                        multiple
+                    >
+                    <small style="display:block;color:var(--text-muted);margin-top:6px;">
+                        You can select multiple face photos.
+                    </small>
                 </div>
-
-
 
                 <div id="liveCameraBox">
+                    <video id="webcamVideo" autoplay playsinline muted></video>
+                    <img id="cameraPreview" alt="Snapshot preview">
 
-                    <video id="webcamVideo" autoplay playsinline></video>
+                    <div style="display:flex;gap:10px;width:100%;justify-content:center;flex-wrap:wrap;">
+                        <button
+                            type="button"
+                            id="btnCapture"
+                            onclick="captureLiveSnapshot()"
+                            style="background:var(--accent-green);color:#fff;"
+                        >
+                            Take Snapshot
+                        </button>
 
-                    <img id="cameraPreview" alt="Snapshot Preview">
-
-                    <div style="display:flex; gap:10px; width:100%; justify-content:center;">
-
-                        <button type="button" id="btnCapture" onclick="captureLiveSnapshot()" style="background-color: var(--accent-green); color: #fff;">📸 Take Snapshot</button>
-
-                        <button type="button" id="btnRetake" onclick="retakeLiveSnapshot()" style="display:none; background-color: var(--accent-amber); color: #000;">🔄 Retake</button>
-
+                        <button
+                            type="button"
+                            id="btnRetake"
+                            onclick="retakeLiveSnapshot()"
+                            style="display:none;background:var(--accent-amber);color:#000;"
+                        >
+                            Retake
+                        </button>
                     </div>
-
                 </div>
 
-
-
-                <button type="submit" id="btnRegisterSubmit" class="btn-register" style="width: 100%; margin-top: 10px; justify-content: center;">
-
-                    Submit & Register Employee
-
+                <button
+                    type="submit"
+                    id="btnRegisterSubmit"
+                    class="btn-register"
+                    style="width:100%;margin-top:10px;"
+                >
+                    Submit &amp; Register Employee
                 </button>
-
             </form>
-
         </div>
-
     </div>
 
-
-
-    <!-- Employee List Modal -->
-
-    <div id="employeeModal" class="modal">
-
+    <!-- Registered Employees Modal -->
+    <div id="employeeModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="employeeModalTitle">
         <div class="modal-content">
+            <button
+                type="button"
+                class="close-btn"
+                aria-label="Close employee list"
+                onclick="closeModal('employeeModal')"
+            >
+                &times;
+            </button>
 
-            <button class="close-btn" onclick="closeModal('employeeModal')">&times;</button>
-
-            <h2 class="modal-title">Registered Employees</h2>
+            <h2 id="employeeModalTitle" class="modal-title">Registered Employees</h2>
 
             <div id="employeeListContainer">
-
-                <p style="color: var(--text-muted);">Loading employees...</p>
-
+                <p style="color:var(--text-muted);">Loading employees...</p>
             </div>
-
         </div>
-
     </div>
 
+    <!-- Registered Photo vs Latest Live Photo Modal -->
+    <div
+        id="photoComparisonModal"
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modalPhotoEmpId"
+    >
+        <div class="modal-content" style="max-width:700px;">
+            <button
+                type="button"
+                class="close-btn"
+                aria-label="Close photo comparison"
+                onclick="closePhotoComparisonModal()"
+            >
+                &times;
+            </button>
 
+            <h2 id="modalPhotoEmpId" class="modal-title">
+                Employee Photo Verification
+            </h2>
 
-    <!-- Photo Comparison Modal (Registered Profile Photo vs Latest Live Punch Photo) -->
+            <div class="photo-comparison-grid">
+                <div>
+                    <div class="comparison-label" style="color:var(--accent-blue);">
+                        Registered Photo
+                    </div>
 
-    <div id="photoComparisonModal" class="modal" style="display:none;">
-
-        <div class="modal-content" style="max-width: 640px;">
-
-            <button class="close-btn" onclick="closePhotoComparisonModal()">&times;</button>
-
-            <h2 class="modal-title" id="modalPhotoEmpId">Employee Photo Verification</h2>
-
-            <div style="display: flex; gap: 20px; justify-content: center; align-items: center; margin-top: 15px;">
-
-                <div style="text-align: center; flex: 1;">
-
-                    <div style="font-size: 13px; font-weight: 600; color: var(--accent-blue); margin-bottom: 8px;">Registered Photo</div>
-
-                    <img id="imgRegisteredPhoto" src="" style="width: 100%; max-height: 250px; object-fit: cover; border-radius: 8px; border: 2px solid #334155;" alt="Registered Photo">
-
+                    <img
+                        id="imgRegisteredPhoto"
+                        class="comparison-photo"
+                        src=""
+                        alt="Registered employee photo"
+                    >
                 </div>
 
-                <div style="text-align: center; flex: 1;">
+                <div>
+                    <div class="comparison-label" style="color:var(--accent-green);">
+                        Live Photo (Latest Punch)
+                    </div>
 
-                    <div style="font-size: 13px; font-weight: 600; color: var(--accent-green); margin-bottom: 8px;">Live Photo (Latest Punch)</div>
-
-                    <img id="imgLivePhoto" src="" style="width: 100%; max-height: 250px; object-fit: cover; border-radius: 8px; border: 2px solid var(--accent-green);" alt="Live Photo">
-
+                    <img
+                        id="imgLivePhoto"
+                        class="comparison-photo"
+                        src=""
+                        alt="Latest live attendance photo"
+                    >
                 </div>
-
             </div>
 
-            <div style="text-align: center; margin-top: 20px;">
-
-                <button type="button" onclick="closePhotoComparisonModal()" style="background-color: #334155; color: #fff; padding: 8px 20px;">Close</button>
-
+            <div style="text-align:center;margin-top:20px;">
+                <button
+                    type="button"
+                    onclick="closePhotoComparisonModal()"
+                    style="background:#334155;color:#fff;padding:8px 20px;"
+                >
+                    Close
+                </button>
             </div>
-
         </div>
-
     </div>
 
-
-
-    <script src="app.js"></script>
-
+    <!-- Load the JavaScript file from the same frontend directory -->
+    <script defer src="./app.js"></script>
 </body>
-
 </html>

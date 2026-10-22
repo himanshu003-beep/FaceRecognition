@@ -1,134 +1,147 @@
+"""AI camera gateway for AIFace attendance.
+
+Camera sources and credentials should be configured in .env, not hard-coded.
+"""
 import os
-import sys
-import time
 import signal
 import threading
-import requests
+import time
+from pathlib import Path
+from typing import Optional, Tuple
+
 import cv2
 import numpy as np
+import requests
 import torch
-from facenet_pytorch import MTCNN
 from dotenv import load_dotenv
+from facenet_pytorch import MTCNN
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / "backend" / ".env")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000/api/attendance/process")
-MIN_SHARPNESS = float(os.getenv("MIN_SHARPNESS_LAPLACIAN", "85.0"))
+MIN_SHARPNESS = float(os.getenv("MIN_SHARPNESS_LAPLACIAN", "80.0"))
 MOVEMENT_THRESHOLD_PX = int(os.getenv("STATIONARY_MOVEMENT_PIXELS", "25"))
-RECRAW_COOLDOWN = float(os.getenv("RECRAW_COOLDOWN_SECONDS", "10.0"))
+RECAPTURE_COOLDOWN = float(os.getenv("RECAPTURE_COOLDOWN_SECONDS", "10.0"))
+MOTION_DEBOUNCE_SECONDS = float(os.getenv("MOTION_DEBOUNCE_SECONDS", "1.2"))
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("BACKEND_REQUEST_TIMEOUT_SECONDS", "3.5"))
+CAM_LOGIN_SRC = os.getenv("CAM_LOGIN_SRC", "0")
+CAM_LOGOUT_SRC = os.getenv("CAM_LOGOUT_SRC", os.getenv("CAM2_RTSP_URL", ""))
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-CAM_LOGIN_SRC = 0
-CAM_LOGOUT_SRC = "rtsp://nidhin:Nidhin123@192.168.2.178:554"
-
-mtcnn = MTCNN(
-    keep_all=True,
-    min_face_size=60,
-    thresholds=[0.6, 0.7, 0.7],
-    factor=0.709,
-    device=DEVICE
-)
-
+mtcnn = MTCNN(keep_all=True, min_face_size=60, thresholds=[0.6, 0.7, 0.7], factor=0.709, device=DEVICE)
 running = True
+
 
 def signal_handler(sig, frame):
     global running
-    print("\n[*] Shutting down streams cleanly...")
+    print("\n[*] Shutting down edge video pipelines...")
     running = False
+
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+
 class FaceTrackerState:
+    """Movement tracker whose cooldown is updated only after a usable crop is queued."""
     def __init__(self):
         self.last_centroid = None
-        self.last_capture_time = 0.0
         self.last_box_size = None
+        self.last_successful_capture_time = 0.0
         self.is_stationary = False
+        self.lock = threading.Lock()
 
     def evaluate_movement(self, box, current_time):
-        x1, y1, x2, y2 = box
-        cx = int((x1 + x2) / 2)
-        cy = int((y1 + y2) / 2)
-        w = x2 - x1
-        h = y2 - y1
+        x1, y1, x2, y2 = [float(v) for v in box]
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        size = (x2 - x1, y2 - y1)
+        with self.lock:
+            if self.last_centroid is None:
+                self.last_centroid, self.last_box_size = (cx, cy), size
+                self.is_stationary = False
+                return True, "initial_detection"
 
-        if self.last_centroid is None:
-            self.last_centroid = (cx, cy)
-            self.last_box_size = (w, h)
-            self.last_capture_time = current_time
-            self.is_stationary = False
-            return True, "new_presence"
+            dist = float(np.hypot(cx - self.last_centroid[0], cy - self.last_centroid[1]))
+            size_diff = abs(size[0] - self.last_box_size[0]) + abs(size[1] - self.last_box_size[1])
+            moved = dist >= MOVEMENT_THRESHOLD_PX or size_diff >= MOVEMENT_THRESHOLD_PX * 1.5
+            since_capture = current_time - self.last_successful_capture_time
 
-        dist = np.sqrt((cx - self.last_centroid[0])**2 + (cy - self.last_centroid[1])**2)
-        size_diff = abs(w - self.last_box_size[0]) + abs(h - self.last_box_size[1])
+            if moved:
+                self.is_stationary = False
+                self.last_centroid, self.last_box_size = (cx, cy), size
+                if since_capture >= MOTION_DEBOUNCE_SECONDS:
+                    return True, "motion_recapture"
+                return False, "motion_debounce"
 
-        time_since_last = current_time - self.last_capture_time
-
-        # Agar banda stationary hai aur cooldown pass nahi hua, skip upload
-        if dist < MOVEMENT_THRESHOLD_PX and size_diff < (MOVEMENT_THRESHOLD_PX * 1.5):
             self.is_stationary = True
-            if time_since_last < RECRAW_COOLDOWN:
-                return False, "stationary_suppressed"
-            else:
-                # Periodic verification capture for stationary presence
-                self.last_capture_time = current_time
-                return True, "stationary_cooldown_expired"
-        else:
-            # Significant movement detected
-            self.is_stationary = False
-            self.last_centroid = (cx, cy)
-            self.last_box_size = (w, h)
-            if time_since_last >= 1.5:  # Debounce small tremors
-                self.last_capture_time = current_time
-                return True, "movement_recapture"
-            return False, "movement_debounced"
+            if since_capture >= RECAPTURE_COOLDOWN:
+                return True, "stationary_refresh"
+            return False, "stationary_suppression"
 
-gate_trackers = {
-    "LOGIN": FaceTrackerState(),
-    "LOGOUT": FaceTrackerState()
-}
+    def mark_capture_queued(self, current_time, box=None):
+        with self.lock:
+            self.last_successful_capture_time = current_time
+            if box is not None:
+                x1, y1, x2, y2 = [float(v) for v in box]
+                self.last_centroid = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+                self.last_box_size = (x2 - x1, y2 - y1)
+
+
+gate_trackers = {"LOGIN": FaceTrackerState(), "LOGOUT": FaceTrackerState()}
+
 
 class ThreadedCamera:
     def __init__(self, src, is_rtsp=False):
         self.src = src
         self.is_rtsp = is_rtsp
-        if self.is_rtsp:
-            self.cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG)
-        else:
-            self.cap = cv2.VideoCapture(self.src)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap = None
         self.frame = None
         self.ret = False
         self.stopped = False
         self.lock = threading.Lock()
+        self._open_capture()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
 
-        self.t = threading.Thread(target=self.update, args=(), daemon=True)
-        self.t.start()
+    def _open_capture(self):
+        cap = cv2.VideoCapture(self.src, cv2.CAP_FFMPEG) if self.is_rtsp else cv2.VideoCapture(int(self.src) if str(self.src).isdigit() else self.src)
+        if not self.is_rtsp:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap = cap
 
     def update(self):
         while not self.stopped:
-            if not self.cap.isOpened():
-                time.sleep(1)
-                try:
-                    if self.is_rtsp: self.cap.open(self.src, cv2.CAP_FFMPEG)
-                    else: self.cap.open(self.src)
-                except Exception:
-                    pass
+            if self.cap is None or not self.cap.isOpened():
+                self._release_capture()
+                time.sleep(1.0)
+                if not self.stopped:
+                    self._open_capture()
                 continue
 
             grabbed, frame = self.cap.read()
-            if not grabbed:
-                time.sleep(0.01)
+            if not grabbed or frame is None:
+                with self.lock:
+                    self.ret, self.frame = False, None
+                # Recreate the capture object; read() can fail while isOpened() remains true.
+                self._release_capture()
+                time.sleep(0.5)
+                if not self.stopped:
+                    self._open_capture()
                 continue
 
             with self.lock:
-                self.ret = grabbed
-                self.frame = frame
+                self.ret, self.frame = True, frame
+
+    def _release_capture(self):
+        cap = self.cap
+        self.cap = None
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception as exc:
+                print(f"[CAMERA] release error: {exc}")
 
     def read(self):
         with self.lock:
@@ -138,32 +151,30 @@ class ThreadedCamera:
 
     def stop(self):
         self.stopped = True
-        if self.cap.isOpened():
-            self.cap.release()
+        self._release_capture()
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+
 
 def calculate_sharpness(image_bgr):
-    """Laplacian variance se focus aur motion blur measure karta hai"""
+    if image_bgr is None or image_bgr.size == 0:
+        return 0.0
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-def extract_safe_face_crop(clean_frame, box, target_size=(240, 240)):
-    h_img, w_img, _ = clean_frame.shape
-    x1, y1, x2, y2 = [int(b) for b in box]
 
-    w = x2 - x1
-    h = y2 - y1
-
+def extract_canonical_face_crop(clean_frame, box, target_size=(240, 240)):
+    if clean_frame is None or clean_frame.size == 0:
+        return None, 0.0
+    h_img, w_img = clean_frame.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in box]
+    w, h = x2 - x1, y2 - y1
     if w < 50 or h < 50:
         return None, 0.0
 
-    pad_w = int(w * 0.28)
-    pad_h = int(h * 0.28)
-
-    nx1 = max(0, x1 - pad_w)
-    ny1 = max(0, y1 - pad_h)
-    nx2 = min(w_img, x2 + pad_w)
-    ny2 = min(h_img, y2 + pad_h)
-
+    pad_w, pad_h = int(w * 0.35), int(h * 0.35)
+    nx1, ny1 = max(0, x1 - pad_w), max(0, y1 - pad_h)
+    nx2, ny2 = min(w_img, x2 + pad_w), min(h_img, y2 + pad_h)
     crop = clean_frame[ny1:ny2, nx1:nx2]
     if crop.size == 0 or crop.shape[0] < 30 or crop.shape[1] < 30:
         return None, 0.0
@@ -171,102 +182,94 @@ def extract_safe_face_crop(clean_frame, box, target_size=(240, 240)):
     sharpness = calculate_sharpness(crop)
     if sharpness < MIN_SHARPNESS:
         return None, sharpness
+    return cv2.resize(crop, target_size, interpolation=cv2.INTER_LANCZOS4), sharpness
 
-    resized = cv2.resize(crop, target_size, interpolation=cv2.INTER_LANCZOS4)
-    return resized, sharpness
 
-def send_frame_to_backend(cropped_face, camera_type: str, sharpness: float):
-    def _worker():
+def send_frame_to_backend(cropped_face, camera_id: str, camera_type: str, sharpness: float):
+    """Send one validated crop; log HTTP and application-level status separately."""
+    ok, encoded_img = cv2.imencode(".jpg", cropped_face, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+    if not ok:
+        print(f"[{camera_id}] JPEG encoding failed")
+        return False
+
+    files = {"file": ("face.jpg", encoded_img.tobytes(), "image/jpeg")}
+    data = {"camera_id": camera_id.upper(), "camera_type": camera_type.upper()}
+    started = time.time()
+    try:
+        response = requests.post(BACKEND_URL, files=files, data=data, timeout=REQUEST_TIMEOUT_SECONDS)
+        elapsed_ms = (time.time() - started) * 1000
         try:
-            start_t = time.time()
-            success, encoded_img = cv2.imencode('.jpg', cropped_face, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
-            if not success: return
+            result = response.json()
+        except ValueError:
+            result = {}
+        status = result.get("status", "unknown")
+        print(f"[{camera_id} -> {camera_type} {elapsed_ms:.0f}ms | Sharpness: {sharpness:.1f}] HTTP {response.status_code} | Status: {status} | User: {result.get('user_id')} | Score: {result.get('similarity_score')}")
+        if not response.ok:
+            return False
+        # A 200 response may represent a suppression/rejection, not a persisted attendance event.
+        non_success = {"uncertain_evaluating", "already_logged_in_suppressed", "no_active_login_found", "cooldown_throttled", "illegal_gate_operation", "unknown_suppressed", "rejected", "error"}
+        return status not in non_success
+    except requests.RequestException as exc:
+        print(f"[{camera_id}] Backend request failed: {exc}")
+        return False
 
-            files = {'file': ('face.jpg', encoded_img.tobytes(), 'image/jpeg')}
-            data = {'camera_type': camera_type.upper()}
 
-            response = requests.post(BACKEND_URL, files=files, data=data, timeout=3.5)
-            elapsed = (time.time() - start_t) * 1000
-            if response.status_code == 200:
-                res = response.json()
-                print(f"[{camera_type} {elapsed:.0f}ms | Sharpness: {sharpness:.1f}] Status: {res.get('status')} | User: {res.get('user_id')} | Score: {res.get('similarity_score')}")
-        except Exception as e:
-            pass
+def process_camera(camera, camera_key, camera_id, camera_type, window_name, color):
+    ret, frame = camera.read()
+    if not ret or frame is None:
+        return
+    display_frame = frame.copy()
+    try:
+        boxes, _ = mtcnn.detect(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    except Exception as exc:
+        print(f"[{camera_id}] Face detection failed: {exc}")
+        boxes = None
 
-    threading.Thread(target=_worker, daemon=True).start()
+    if boxes is not None and len(boxes) > 0:
+        # Current design intentionally processes the largest/first detector result only.
+        primary_box = max(boxes, key=lambda b: max(0, b[2] - b[0]) * max(0, b[3] - b[1]))
+        tracker = gate_trackers[camera_key]
+        should_capture, reason = tracker.evaluate_movement(primary_box, time.time())
+        if should_capture:
+            crop, sharpness = extract_canonical_face_crop(frame, primary_box)
+            if crop is None:
+                print(f"[{camera_id}] Crop rejected (sharpness={sharpness:.1f}); retry remains eligible")
+            else:
+                # Only update the cooldown after a usable crop has been accepted for dispatch.
+                tracker.mark_capture_queued(time.time(), primary_box)
+                threading.Thread(target=send_frame_to_backend, args=(crop, camera_id, camera_type, sharpness), daemon=True).start()
+
+        x1, y1, x2, y2 = [int(v) for v in primary_box]
+        cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+        label = f"{camera_type} ({'STATIONARY' if tracker.is_stationary else 'MOVING'}) - {reason}"
+        cv2.putText(display_frame, label, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_DUPLEX, 0.45, color, 1)
+
+    cv2.imshow(window_name, cv2.resize(display_frame, (640, 360)))
+
 
 def run_hybrid_streams():
     global running
-    print("[*] Starting Movement-Aware & Sharpness-Gated Attendance Stream")
-    print(f"[*] Strict Similarity Threshold: {os.getenv('RECOGNITION_THRESHOLD', '0.90')}")
-    print(f"[*] Min Sharpness: {MIN_SHARPNESS} | Movement Threshold: {MOVEMENT_THRESHOLD_PX}px")
+    if not CAM_LOGOUT_SRC:
+        raise RuntimeError("CAM_LOGOUT_SRC is missing. Set it in your .env file; do not hard-code RTSP credentials.")
 
-    stream_login = ThreadedCamera(CAM_LOGIN_SRC, is_rtsp=False)
-    stream_logout = ThreadedCamera(CAM_LOGOUT_SRC, is_rtsp=True)
+    login_source = int(CAM_LOGIN_SRC) if CAM_LOGIN_SRC.isdigit() else CAM_LOGIN_SRC
+    login = ThreadedCamera(login_source, is_rtsp=False)
+    logout = ThreadedCamera(CAM_LOGOUT_SRC, is_rtsp=True)
+    print("[*] Edge Streaming Gateway initialized.")
+    print("    - Login camera -> SYSTEM_CAM / LOGIN")
+    print("    - Office camera -> OFFICE_RTSP / LOGOUT")
+    try:
+        while running:
+            process_camera(login, "LOGIN", "SYSTEM_CAM", "LOGIN", "Gate 1 - LOGIN", (0, 255, 0))
+            process_camera(logout, "LOGOUT", "OFFICE_RTSP", "LOGOUT", "Gate 2 - LOGOUT", (0, 0, 255))
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        running = False
+        login.stop()
+        logout.stop()
+        cv2.destroyAllWindows()
 
-    while running:
-        ret_in, frame_in = stream_login.read()
-        ret_out, frame_out = stream_logout.read()
-        now = time.time()
-
-        # Gate 1: System Cam (LOGIN)
-        if ret_in and frame_in is not None:
-            raw_clean_in = frame_in.copy()
-            rgb_in = cv2.cvtColor(frame_in, cv2.COLOR_BGR2RGB)
-            try:
-                boxes_in, _ = mtcnn.detect(rgb_in)
-            except Exception:
-                boxes_in = None
-
-            if boxes_in is not None and len(boxes_in) > 0:
-                primary_box = boxes_in[0]
-                should_capture, reason = gate_trackers["LOGIN"].evaluate_movement(primary_box, now)
-                
-                if should_capture:
-                    face_crop, score_sharp = extract_safe_face_crop(raw_clean_in, primary_box)
-                    if face_crop is not None:
-                        send_frame_to_backend(face_crop, "LOGIN", score_sharp)
-                
-                x1, y1, x2, y2 = [int(b) for b in primary_box]
-                color = (0, 255, 0) if not gate_trackers["LOGIN"].is_stationary else (255, 165, 0)
-                tag = f"LOGIN ({'MOVING' if not gate_trackers['LOGIN'].is_stationary else 'STATIONARY'})"
-                cv2.rectangle(frame_in, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame_in, tag, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
-
-            cv2.imshow("Gate 1 - LOGIN", cv2.resize(frame_in, (640, 360)))
-
-        # Gate 2: Office RTSP (LOGOUT)
-        if ret_out and frame_out is not None:
-            raw_clean_out = frame_out.copy()
-            rgb_out = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)
-            try:
-                boxes_out, _ = mtcnn.detect(rgb_out)
-            except Exception:
-                boxes_out = None
-
-            if boxes_out is not None and len(boxes_out) > 0:
-                primary_box = boxes_out[0]
-                should_capture, reason = gate_trackers["LOGOUT"].evaluate_movement(primary_box, now)
-                
-                if should_capture:
-                    face_crop, score_sharp = extract_safe_face_crop(raw_clean_out, primary_box)
-                    if face_crop is not None:
-                        send_frame_to_backend(face_crop, "LOGOUT", score_sharp)
-
-                x1, y1, x2, y2 = [int(b) for b in primary_box]
-                color = (0, 0, 255) if not gate_trackers["LOGOUT"].is_stationary else (255, 165, 0)
-                tag = f"LOGOUT ({'MOVING' if not gate_trackers['LOGOUT'].is_stationary else 'STATIONARY'})"
-                cv2.rectangle(frame_out, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame_out, tag, (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
-
-            cv2.imshow("Gate 2 - LOGOUT", cv2.resize(frame_out, (640, 360)))
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    stream_login.stop()
-    stream_logout.stop()
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     run_hybrid_streams()

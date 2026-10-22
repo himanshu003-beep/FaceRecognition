@@ -1,14 +1,37 @@
+# Python environments
 venv/
-__pycache__/
-*.pyc
-.env
-backend/captures/*.jpg
-captures/*.jpg
-.env
 stream_venv/
 backend_venv/
-.venv312/
+.venv*/
+backend/venv/
+backend/.venv/
+
+# Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Logs and process files
+*.log
+*.pid
+
+# Generated captures and employee data
 captures/
+backend/captures/
 employee_photos/
+backend/employee_photos/
+
+# Local backups
+backups/
+backend/backups/
+*.sql
+*.dump
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store

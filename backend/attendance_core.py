@@ -4,7 +4,7 @@ import os
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -156,6 +156,8 @@ VECTOR_INDEX_MAP: List[Tuple[str, str]] = []
 attendance_records: List[Dict[str, Any]] = []
 
 ATTENDANCE_PUNCH_COOLDOWN: Dict[str, float] = {}
+
+UNKNOWN_VISITOR_EMBEDDINGS: Dict[int, np.ndarray] = {}
 
 def rebuild_vector_cache():
     global VECTOR_INDEX_MATRIX, VECTOR_INDEX_MAP
@@ -325,6 +327,84 @@ def save_live_punch_photo(image_bytes: bytes, user_id: str) -> str:
     except Exception:
         return ""
 
+def _load_unknown_record_embedding(record: Dict[str, Any]) -> Optional[np.ndarray]:
+    try:
+        record_id = int(record["id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    cached = UNKNOWN_VISITOR_EMBEDDINGS.get(record_id)
+    if cached is not None:
+        return cached
+
+    photo_url = str(record.get("photo_url") or "").strip()
+    filename = Path(photo_url.split("?", 1)[0]).name
+    if not filename:
+        return None
+
+    photo_path = (UNKNOWN_DIR / filename).resolve()
+    if photo_path.parent != UNKNOWN_DIR.resolve() or not photo_path.is_file():
+        return None
+
+    try:
+        embedding, _ = extract_canonical_face_embedding_sync(
+            photo_path.read_bytes(), require_face=False
+        )
+        if embedding is None:
+            return None
+
+        normalized = l2_normalize(embedding)
+        UNKNOWN_VISITOR_EMBEDDINGS[record_id] = normalized
+        return normalized
+    except Exception as exc:
+        print(f"[UNKNOWN MATCH SKIP] Could not encode attendance photo {record_id}: {exc}")
+        return None
+
+def _find_active_unknown_match(
+    incoming_embedding: Optional[np.ndarray], now_ist: datetime
+) -> Optional[Dict[str, Any]]:
+    if incoming_embedding is None:
+        return None
+
+    incoming = l2_normalize(incoming_embedding)
+    cutoff_str = format_timestamp(now_ist - timedelta(hours=18))
+    now_str = format_timestamp(now_ist)
+    conn = None
+
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, user_id, name, camera_id, photo_url, live_photo_url,
+                          registered_photo_url, similarity_score, login_time,
+                          logout_time, duration, status
+                   FROM attendance
+                   WHERE user_id=%s AND status=%s
+                     AND login_time >= %s AND login_time <= %s
+                   ORDER BY id DESC""",
+                ("UNKNOWN", "UNAUTHORIZED", cutoff_str, now_str),
+            )
+            candidates = list(cur.fetchall() or [])
+    finally:
+        if conn:
+            conn.close()
+
+    best_record = None
+    best_score = RECOGNITION_THRESHOLD
+    for record in candidates:
+        candidate = _load_unknown_record_embedding(record)
+        if candidate is None or candidate.shape != incoming.shape:
+            continue
+
+        score = float(np.dot(candidate, incoming))
+        if score >= RECOGNITION_THRESHOLD and (
+            best_record is None or score > best_score
+        ):
+            best_record = record
+            best_score = score
+
+    return best_record
+
 def identify_face_strict(incoming_embedding: np.ndarray) -> Tuple[str, str, float, str]:
     global VECTOR_INDEX_MATRIX, VECTOR_INDEX_MAP
     in_vec = l2_normalize(incoming_embedding)
@@ -352,7 +432,7 @@ def identify_face_strict(incoming_embedding: np.ndarray) -> Tuple[str, str, floa
     print(f"[RECOGNITION LOG] Score: {highest_score:.4f} | Class: {classification} | Target: {best_user_id} ({best_name})")
     return best_user_id, best_name, highest_score, classification
 
-def record_attendance_strict(user_id: str, name: str, camera_id: str, camera_type: str, live_photo_url: str, score: float, classification: str):
+def record_attendance_strict(user_id: str, name: str, camera_id: str, camera_type: str, live_photo_url: str, score: float, classification: str, incoming_embedding: Optional[np.ndarray] = None):
     global attendance_records, ATTENDANCE_PUNCH_COOLDOWN, REGISTERED_USERS
     now_ist = get_current_ist()
     time_str = format_timestamp(now_ist)
@@ -372,9 +452,10 @@ def record_attendance_strict(user_id: str, name: str, camera_id: str, camera_typ
     if classification == "UNCERTAIN":
         return "uncertain_suppressed", attendance_records, None
 
+    is_unknown = classification == "UNKNOWN" or user_id == "UNKNOWN"
     cooldown_key = f"{camera_id}_{user_id}"
 
-    if current_ts - ATTENDANCE_PUNCH_COOLDOWN.get(cooldown_key, 0.0) < 10.0:
+    if not is_unknown and current_ts - ATTENDANCE_PUNCH_COOLDOWN.get(cooldown_key, 0.0) < 10.0:
         return "cooldown_throttled", attendance_records, None
 
     registered_photo = REGISTERED_USERS.get(user_id, {}).get("photo_url", "")
@@ -404,49 +485,88 @@ def record_attendance_strict(user_id: str, name: str, camera_id: str, camera_typ
     # -------------------------------------------------------------------------
 
     if classification == "UNKNOWN" or user_id == "UNKNOWN":
-        ATTENDANCE_PUNCH_COOLDOWN[cooldown_key] = current_ts
+        # UNKNOWN is shared by all unregistered people. Match the incoming face
+        # to an active login photo before suppressing a login or recording logout.
+        active_unknown = _find_active_unknown_match(incoming_embedding, now_ist)
 
-        # LOGOUT Gate: Sirf Office RTSP camera unknown sessions ko close kar sakta hai
         if camera_type == "LOGOUT":
-            active_unknown = None
-            for r in attendance_records:
-                if r["user_id"] == "UNKNOWN" and r["status"] == "UNAUTHORIZED":
-                    login_time_val = str(r.get("login_time", "")).strip()
-                    if login_time_val and login_time_val != "-":
-                        try:
-                            login_dt = datetime.strptime(login_time_val, "%Y-%m-%d %H:%M:%S")
-                            login_dt = IST.localize(login_dt)
-                            delta_hours = (now_ist - login_dt).total_seconds() / 3600.0
-                            # Shift window: active if within last 18 hours
-                            if 0.0 <= delta_hours <= 18.0:
-                                active_unknown = r
-                                break
-                        except Exception:
-                            if login_time_val.startswith(today_str):
-                                active_unknown = r
-                                break
-
             if active_unknown:
+                try:
+                    login_dt = IST.localize(
+                        datetime.strptime(
+                            str(active_unknown["login_time"]),
+                            "%Y-%m-%d %H:%M:%S",
+                        )
+                    )
+                    elapsed_seconds = (now_ist - login_dt).total_seconds()
+                except (KeyError, TypeError, ValueError):
+                    elapsed_seconds = 45.0
+
+                if 0.0 <= elapsed_seconds < 45.0:
+                    print(
+                        "[UNKNOWN LOGOUT DEBOUNCED] Ignored matching face "
+                        f"{elapsed_seconds:.1f}s after login."
+                    )
+                    return "cooldown_throttled", attendance_records, None
+
                 duration_calc = calculate_duration(str(active_unknown["login_time"]), now_ist)
                 conn = None
                 try:
                     conn = get_db_connection()
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE attendance SET logout_time=%s, duration=%s, status=%s WHERE id=%s",
-                            (time_str, duration_calc, "CHECKED OUT", active_unknown["id"])
+                            """UPDATE attendance
+                               SET logout_time=%s, duration=%s, status=%s,
+                                   live_photo_url=%s, camera_id=%s
+                               WHERE id=%s AND status=%s""",
+                            (
+                                time_str,
+                                duration_calc,
+                                "CHECKED OUT",
+                                live_photo_url,
+                                camera_id,
+                                active_unknown["id"],
+                                "UNAUTHORIZED",
+                            ),
                         )
-                    active_unknown["logout_time"] = time_str
-                    active_unknown["duration"] = duration_calc
-                    active_unknown["status"] = "CHECKED OUT"
+                        if cur.rowcount != 1:
+                            return "no_active_login_found", attendance_records, None
                 finally:
                     if conn: conn.close()
-                return "logout_recorded", attendance_records, active_unknown
+
+                target_record = next(
+                    (
+                        record
+                        for record in attendance_records
+                        if record.get("id") == active_unknown["id"]
+                    ),
+                    active_unknown,
+                )
+                target_record["logout_time"] = time_str
+                target_record["duration"] = duration_calc
+                target_record["status"] = "CHECKED OUT"
+                target_record["live_photo_url"] = live_photo_url
+                target_record["camera_id"] = camera_id
+
+                if not any(
+                    record.get("id") == active_unknown["id"]
+                    for record in attendance_records
+                ):
+                    attendance_records.insert(0, target_record)
+
+                UNKNOWN_VISITOR_EMBEDDINGS.pop(int(active_unknown["id"]), None)
+                return "logout_recorded", attendance_records, target_record
 
             # Reject unknown logout without prior unauthorized login
-            print(f"[UNKNOWN LOGOUT REJECTED] Unknown visitor attempted logout without active unauthorized session.")
+            print(
+                "[UNKNOWN LOGOUT REJECTED] No matching active visitor login "
+                "was found."
+            )
             return "no_active_login_found", attendance_records, None
         elif camera_type == "LOGIN":
+            if active_unknown:
+                return "unknown_suppressed", attendance_records, None
+
             new_entry = {
                 "id": None, "user_id": "UNKNOWN", "name": "Unknown Visitor",
                 "camera_id": camera_id, "photo_url": live_photo_url,
@@ -478,6 +598,10 @@ def record_attendance_strict(user_id: str, name: str, camera_id: str, camera_typ
             finally:
                 if conn: conn.close()
 
+            if incoming_embedding is not None:
+                UNKNOWN_VISITOR_EMBEDDINGS[int(new_entry["id"])] = l2_normalize(
+                    incoming_embedding
+                )
             attendance_records.insert(0, new_entry)
             return "unknown_detected", attendance_records, new_entry
 

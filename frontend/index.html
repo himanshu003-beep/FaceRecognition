@@ -232,6 +232,7 @@
             display: inline-block;
             width: 44px;
             height: 44px;
+            z-index: 1;
         }
 
         .avatar-img {
@@ -242,7 +243,18 @@
             border: 2px solid #334155;
             background: #0f172a;
             cursor: pointer;
-            transition: transform 0.25s ease;
+            transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease, border-radius 0.25s ease;
+        }
+
+        .photo-wrapper:hover {
+            z-index: 99;
+        }
+
+        .photo-wrapper:hover .avatar-img {
+            transform: scale(2.8);
+            border-radius: 8px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.85), 0 0 12px rgba(59, 130, 246, 0.6);
+            border-color: #38bdf8;
         }
 
         .badge {
@@ -469,6 +481,15 @@
                 flex: 1 1 calc(50% - 8px);
             }
 
+            .toolbar {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .filter-select {
+                width: 100%;
+            }
+
             .stats-grid {
                 grid-template-columns: 1fr 1fr;
                 gap: 10px;
@@ -550,15 +571,21 @@
             </div>
         </section>
 
-        <section class="toolbar" aria-label="Attendance filters">
-            <label for="recordFilter" class="stat-label">Filter attendance</label>
-
-            <select id="recordFilter" class="filter-select" onchange="filterRecords()">
-                <option value="ALL">View Records: All</option>
-                <option value="IN_OFFICE">Status: In Office Only</option>
-                <option value="CHECKED_OUT">Status: Checked Out Only</option>
-                <option value="UNAUTHORIZED">Status: Unknown Visitors Only</option>
-            </select>
+        <section class="toolbar" aria-label="Attendance filters" style="display:flex;justify-content:space-between;background:var(--bg-card);border:1px solid var(--border-color);padding:12px 18px;border-radius:10px;margin-bottom:18px;">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <label for="recordFilter" class="stat-label" style="margin:0;font-size:13px;font-weight:700;color:var(--text-main);display:flex;align-items:center;gap:6px;">
+                    View Dropdown:
+                </label>
+                <select id="recordFilter" class="filter-select" onchange="filterRecords()" style="font-weight:600;border:1px solid #3b82f6;background:#0f172a;padding:8px 14px;">
+                    <option value="ALL">📋 View Records</option>
+                    <option value="IN_OFFICE">🟢 Status: In Office Only</option>
+                    <option value="CHECKED_OUT">🟣 Status: Checked Out Only</option>
+                    <option value="UNAUTHORIZED">🔴 Status: Unknown Visitors Only</option>
+                </select>
+            </div>
+            <div id="filterCountBadge" style="font-size:12px;color:var(--text-muted);font-weight:600;">
+                Showing records
+            </div>
         </section>
 
         <section class="table-container" aria-label="Attendance records">
@@ -566,7 +593,7 @@
                 <thead>
                     <tr>
                         <th>Log ID</th>
-                        <th>Photo</th>
+                        <th>Photo (Hover/Touch)</th>
                         <th>User ID</th>
                         <th>Name</th>
                         <th>Login Time (IST)</th>
@@ -574,12 +601,13 @@
                         <th>Duration</th>
                         <th>Status</th>
                         <th>Match Score</th>
+                        <th style="text-align:center;">Action</th>
                     </tr>
                 </thead>
 
                 <tbody id="attendanceTableBody">
                     <tr>
-                        <td colspan="9" style="text-align:center;color:var(--text-muted);padding:40px;">
+                        <td colspan="10" style="text-align:center;color:var(--text-muted);padding:40px;">
                             Loading attendance logs...
                         </td>
                     </tr>
@@ -765,6 +793,31 @@
                 >
                     Close
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Photo Lightbox Modal (For Touch/Click HD Preview) -->
+    <div id="photoLightboxModal" class="modal" role="dialog" aria-modal="true" onclick="if(event.target === this) closePhotoLightbox()">
+        <div class="modal-content" style="max-width: 440px; text-align: center; padding: 24px;">
+            <button type="button" class="close-btn" onclick="closePhotoLightbox()">&times;</button>
+            <h3 id="lightboxTitle" style="color: var(--accent-blue); margin-bottom: 6px;">Face Capture</h3>
+            <p id="lightboxSubtitle" style="font-size: 13px; color: var(--text-muted); margin-bottom: 14px;"></p>
+            <img id="lightboxImg" src="" alt="Face Preview" style="width: 100%; max-height: 380px; object-fit: contain; border-radius: 10px; border: 2px solid var(--border-color); background: #0b0f19;">
+            <div style="margin-top: 16px;">
+                <button type="button" onclick="closePhotoLightbox()" style="background:#334155;color:#fff;padding:8px 24px;border-radius:6px;">Close Preview</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Row Detail View Modal -->
+    <div id="recordDetailModal" class="modal" role="dialog" aria-modal="true" onclick="if(event.target === this) closeRecordDetailModal()">
+        <div class="modal-content" style="max-width: 520px; padding: 24px;">
+            <button type="button" class="close-btn" onclick="closeRecordDetailModal()">&times;</button>
+            <h2 class="modal-title" style="color: var(--accent-blue); margin-bottom: 16px;">Attendance Record Details</h2>
+            <div id="recordDetailBody" style="font-size: 14px; line-height: 1.8;"></div>
+            <div style="text-align: right; margin-top: 20px;">
+                <button type="button" onclick="closeRecordDetailModal()" style="background: var(--accent-blue); color: #fff; padding: 8px 20px; border-radius: 6px;">Done</button>
             </div>
         </div>
     </div>

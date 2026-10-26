@@ -12,6 +12,7 @@ let isWsConnecting = false;
 
 let dashboardRefreshIntervalMs = 15000;
 let autoRefreshTimer = null;
+let lastRenderedLogsSignature = null;
 
 const DUMMY_AVATAR =
     "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='44' height='44' viewBox='0 0 24 24' fill='%2364748b'><path d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/></svg>";
@@ -79,8 +80,11 @@ async function fetchInitialLogs(isSilent = false) {
         const logs = await res.json();
 
         globalRecords = Array.isArray(logs) ? logs : [];
+        const logsSignature = JSON.stringify(globalRecords);
 
-        renderFullTable(globalRecords);
+        if (logsSignature !== lastRenderedLogsSignature) {
+            renderFullTable(globalRecords);
+        }
         updateStats(globalRecords);
     } catch (error) {
         if (!isSilent) {
@@ -172,6 +176,8 @@ function initWebSocket() {
 
                     updateStats(globalRecords);
                 }
+
+                lastRenderedLogsSignature = JSON.stringify(globalRecords);
             } catch (error) {
                 console.error("[WS] Message parsing failed:", error);
             }
@@ -216,10 +222,19 @@ function renderFullTable(records) {
         return;
     }
 
+    lastRenderedLogsSignature = JSON.stringify(
+        Array.isArray(records) ? records : []
+    );
+
+    const badge = document.getElementById("filterCountBadge");
+
     if (!Array.isArray(records) || records.length === 0) {
+        if (badge) {
+            badge.innerText = "Showing 0 of 0 records";
+        }
         tbody.innerHTML = `
             <tr>
-                <td colspan="9"
+                <td colspan="10"
                     style="text-align:center;color:var(--text-muted);padding:40px;">
                     No attendance records found.
                 </td>
@@ -250,6 +265,10 @@ function renderFullTable(records) {
                 record.status === "UNAUTHORIZED" ||
                 record.user_id === "UNKNOWN"
         );
+    }
+
+    if (badge) {
+        badge.innerText = `Showing ${filteredList.length} of ${records.length} records`;
     }
 
     tbody.innerHTML = filteredList
@@ -289,20 +308,21 @@ function generateRowHtml(record) {
 
     const userId = String(record.user_id || "");
     const safeUserId = escapeHtml(userId);
+    const safeName = escapeHtml(record.name || "-");
+    const safeLogin = escapeHtml(record.login_time || "-");
 
     return `
         <tr id="row-${escapeHtml(record.id)}">
             <td>#${escapeHtml(record.id)}</td>
 
             <td>
-                <div class="photo-wrapper">
+                <div class="photo-wrapper" onclick="openPhotoLightbox('${photo}', '${safeUserId}', '${safeName}', '${safeLogin}')" title="Hover to zoom, Click for HD preview">
                     <img
                         src="${photo}"
                         class="avatar-img"
                         loading="lazy"
                         onerror="this.onerror=null;this.src='${DUMMY_AVATAR}'"
                         alt="Face"
-                        title="Live Capture Photo"
                     >
                 </div>
             </td>
@@ -317,8 +337,8 @@ function generateRowHtml(record) {
                 </a>
             </td>
 
-            <td>${escapeHtml(record.name || "-")}</td>
-            <td class="col-login">${escapeHtml(record.login_time || "-")}</td>
+            <td>${safeName}</td>
+            <td class="col-login">${safeLogin}</td>
             <td class="col-logout">${escapeHtml(record.logout_time || "-")}</td>
             <td class="col-duration">${escapeHtml(record.duration || "-")}</td>
 
@@ -330,6 +350,18 @@ function generateRowHtml(record) {
 
             <td>
                 <span class="score-pill">${escapeHtml(score)}</span>
+            </td>
+
+            <td style="text-align:center;">
+                <button
+                    type="button"
+                    class="btn"
+                    style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);color:#60a5fa;padding:5px 12px;font-size:12px;border-radius:6px;"
+                    onclick="viewRecordDetail('${escapeHtml(record.id)}')"
+                    title="View Full Record Details"
+                >
+                    👁️ View
+                </button>
             </td>
         </tr>
     `;
@@ -544,6 +576,67 @@ function closePhotoComparisonModal() {
 
 function filterRecords() {
     renderFullTable(globalRecords);
+}
+
+// --------------------------------------------------
+// PHOTO LIGHTBOX & RECORD DETAIL MODALS
+// --------------------------------------------------
+
+function openPhotoLightbox(photoUrl, userId, name, loginTime) {
+    const modal = document.getElementById("photoLightboxModal");
+    const img = document.getElementById("lightboxImg");
+    const title = document.getElementById("lightboxTitle");
+    const sub = document.getElementById("lightboxSubtitle");
+
+    if (!modal || !img) return;
+
+    img.src = photoUrl || DUMMY_AVATAR;
+    if (title) title.innerText = name ? `${name} (${userId})` : userId;
+    if (sub) sub.innerText = loginTime ? `Recorded at: ${loginTime} IST` : "Live Face Punch";
+
+    modal.style.display = "flex";
+}
+
+function closePhotoLightbox() {
+    const modal = document.getElementById("photoLightboxModal");
+    if (modal) modal.style.display = "none";
+}
+
+function viewRecordDetail(recordId) {
+    const record = globalRecords.find(r => String(r.id) === String(recordId));
+    if (!record) return;
+
+    const modal = document.getElementById("recordDetailModal");
+    const body = document.getElementById("recordDetailContent") || document.getElementById("recordDetailBody");
+    if (!modal || !body) return;
+
+    const photo = record.photo_url ? getPhotoUrl(record.photo_url) : DUMMY_AVATAR;
+
+    body.innerHTML = `
+        <div style="display:flex;gap:18px;align-items:center;margin-bottom:16px;background:rgba(255,255,255,0.03);padding:14px;border-radius:10px;">
+            <img src="${photo}" style="width:72px;height:72px;border-radius:10px;object-fit:cover;border:2px solid #3b82f6;" alt="Face">
+            <div>
+                <h3 style="color:#f8fafc;font-size:16px;margin-bottom:4px;">${escapeHtml(record.name || "-")}</h3>
+                <p style="color:#60a5fa;font-size:13px;font-weight:600;margin:0;">User ID: ${escapeHtml(record.user_id || "-")}</p>
+                <p style="color:#94a3b8;font-size:12px;margin:2px 0 0 0;">Log ID: #${escapeHtml(record.id)}</p>
+            </div>
+        </div>
+        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+            <tr><td style="padding:6px 0;color:#94a3b8;">Status:</td><td style="padding:6px 0;font-weight:700;color:#f8fafc;">${escapeHtml(record.status || "-")}</td></tr>
+            <tr><td style="padding:6px 0;color:#94a3b8;">Login Time:</td><td style="padding:6px 0;color:#34d399;font-weight:600;">${escapeHtml(record.login_time || "-")}</td></tr>
+            <tr><td style="padding:6px 0;color:#94a3b8;">Logout Time:</td><td style="padding:6px 0;color:#a78bfa;font-weight:600;">${escapeHtml(record.logout_time || "-")}</td></tr>
+            <tr><td style="padding:6px 0;color:#94a3b8;">Working Duration:</td><td style="padding:6px 0;color:#f8fafc;font-weight:600;">${escapeHtml(record.duration || "-")}</td></tr>
+            <tr><td style="padding:6px 0;color:#94a3b8;">Camera Gate:</td><td style="padding:6px 0;color:#f8fafc;">${escapeHtml(record.camera_id || "-")}</td></tr>
+            <tr><td style="padding:6px 0;color:#94a3b8;">Face Match Score:</td><td style="padding:6px 0;color:#fbbf24;font-weight:700;">${escapeHtml(record.similarity_score || "-")}</td></tr>
+        </table>
+    `;
+
+    modal.style.display = "flex";
+}
+
+function closeRecordDetailModal() {
+    const modal = document.getElementById("recordDetailModal");
+    if (modal) modal.style.display = "none";
 }
 
 // --------------------------------------------------

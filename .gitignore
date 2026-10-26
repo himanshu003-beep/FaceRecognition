@@ -28,6 +28,7 @@ backend/employee_photos/
 # Local backups
 backups/
 backend/backups/
+*.backup
 *.sql
 *.dump
 
